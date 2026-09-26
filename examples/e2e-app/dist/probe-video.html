@@ -1,0 +1,46 @@
+<!doctype html><html><head><meta charset="utf-8"></head><body>
+<script>
+let ws; const wsReady = new Promise((r) => { ws = new WebSocket(window.__E2E_WS__); ws.onopen = r; });
+const send = async (step, value) => { await wsReady; ws.send(JSON.stringify({ step, value })); };
+const t = async (name, f) => { let v; try { v = await Promise.race([f(), new Promise((_, j) => setTimeout(() => j(new Error('hung 6s')), 6000))]); } catch (e) { v = 'throw ' + (e && e.name) + ': ' + (e && e.message); } await send(name, v); };
+(async () => {
+  const src = document.createElement('canvas'); src.width = 320; src.height = 240; const sx = src.getContext('2d');
+  let i = 0; setInterval(() => { sx.fillStyle = `hsl(${(i++) * 15},70%,50%)`; sx.fillRect(0, 0, 320, 240); sx.fillStyle = '#fff'; sx.fillRect((i * 5) % 300, 100, 20, 20); }, 33);
+  const stream = src.captureStream(30);
+  const track = stream.getVideoTracks()[0];
+  await t('trackInfo', async () => track.kind + ' ' + track.readyState + ' ' + JSON.stringify(track.getSettings()));
+  const v = document.createElement('video'); v.muted = true; v.playsInline = true; v.autoplay = true;
+  Object.assign(v.style, { position: 'fixed', left: '0', top: '0', width: '2px', height: '2px', opacity: '0.01', pointerEvents: 'none' });
+  document.body.appendChild(v);
+  v.srcObject = new MediaStream([track]);
+  await t('playAttached', async () => { await v.play(); return 'played rs=' + v.readyState; });
+  await t('dims', async () => { for (let k = 0; k < 50 && !v.videoWidth; k++) await new Promise((r) => setTimeout(r, 50)); return v.videoWidth + 'x' + v.videoHeight + ' rs=' + v.readyState; });
+  await t('drawVideoToCanvas', async () => { const c = document.createElement('canvas'); c.width = 320; c.height = 240; const x = c.getContext('2d'); x.drawImage(v, 0, 0, 320, 240); const p = x.getImageData(160, 120, 1, 1).data; return Array.from(p).join(','); });
+  await t('videoFrameFromCanvas', async () => { const c = document.createElement('canvas'); c.width = 320; c.height = 240; c.getContext('2d').drawImage(v, 0, 0); const f = new VideoFrame(c, { timestamp: 1 }); const r = f.codedWidth + 'x' + f.codedHeight + ' ' + f.format; f.close(); return r; });
+  await t('videoFrameFromVideo', async () => { const f = new VideoFrame(v, { timestamp: 1 }); const r = f.codedWidth + 'x' + f.codedHeight; f.close(); return r; });
+  await t('rVFC', async () => typeof v.requestVideoFrameCallback);
+  await t('encodeFromVideo30', async () => {
+    const c = document.createElement('canvas'); c.width = 320; c.height = 240; const x = c.getContext('2d');
+    let n = 0, bytes = 0; const enc = new VideoEncoder({ output: (ch) => { n++; bytes += ch.byteLength; }, error: (e) => { throw e; } });
+    enc.configure({ codec: 'vp8', width: 320, height: 240, bitrate: 400000, framerate: 30, latencyMode: 'realtime' });
+    const t0 = performance.now();
+    for (let k = 0; k < 30; k++) { x.drawImage(v, 0, 0, 320, 240); const f = new VideoFrame(c, { timestamp: k * 33333 }); enc.encode(f, { keyFrame: k === 0 }); f.close(); await new Promise((r) => setTimeout(r, 33)); }
+    await enc.flush(); return `frames ${n} bytes ${bytes} ms ${Math.round(performance.now() - t0)}`;
+  });
+  await t('decodeToCaptureTrack', async () => {
+    const c = document.createElement('canvas'); c.width = 320; c.height = 240; const x = c.getContext('2d'); const out = c.captureStream(); const ot = out.getVideoTracks()[0];
+    const chunks = []; const enc = new VideoEncoder({ output: (ch) => { const b = new Uint8Array(ch.byteLength); ch.copyTo(b); chunks.push([ch.type, ch.timestamp, b]); }, error: () => {} });
+    enc.configure({ codec: 'vp8', width: 320, height: 240, bitrate: 400000, framerate: 30, latencyMode: 'realtime' });
+    for (let k = 0; k < 10; k++) { const f = new VideoFrame(src, { timestamp: k * 33333 }); enc.encode(f, { keyFrame: k === 0 }); f.close(); }
+    await enc.flush();
+    let drawn = 0; const dec = new VideoDecoder({ output: (f) => { x.drawImage(f, 0, 0); drawn++; f.close(); }, error: () => {} });
+    dec.configure({ codec: 'vp8' }); for (const [type, ts, b] of chunks) dec.decode(new EncodedVideoChunk({ type, timestamp: ts, data: b })); await dec.flush();
+    const v2 = document.createElement('video'); v2.muted = true; document.body.appendChild(v2); v2.srcObject = new MediaStream([ot]); await v2.play();
+    for (let k = 0; k < 40 && !v2.videoWidth; k++) await new Promise((r) => setTimeout(r, 50));
+    return `drawn ${drawn} track ${ot.readyState} consumer ${v2.videoWidth}x${v2.videoHeight}`;
+  });
+  await t('audioDestTrack', async () => { const ac = new AudioContext(); const d = ac.createMediaStreamDestination(); const tr = d.stream.getAudioTracks()[0]; const a = new Audio(); a.srcObject = new MediaStream([tr]); await a.play().catch((e) => e.name); return tr.readyState + ' ' + ac.state; });
+  await t('mstEventCtor', async () => typeof MediaStreamTrackEvent + ' ' + (new MediaStreamTrackEvent('removetrack', { track })).track.kind);
+  await send('done', true); ws.send(JSON.stringify({ done: true }));
+})();
+</script></body></html>

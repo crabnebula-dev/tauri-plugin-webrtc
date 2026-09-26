@@ -24,6 +24,7 @@ const hello = {};
 wss.on('connection', (ws) => {
   ws.on('message', (data) => {
     const m = JSON.parse(data);
+    if (m.t === 'log') { console.error(`[${m.name}] ${m.msg}`); return; }
     if (m.t === 'hello') { clients[m.name] = ws; hello[m.name] = m.env; }
     else if (m.t === 'signal') {
       for (const [n, c] of Object.entries(clients)) if (c !== ws) c.send(JSON.stringify(m));
@@ -77,8 +78,15 @@ try {
   answer = run('webkit', 'answer');
   results.chromiumOffers = await run('chromium', 'offer');
   results.chromiumOffersWebkitSide = await answer;
+  // Media: WebKit offers video, Chromium answers matrix-style; then the reverse.
+  answer = run('chromium', 'mediaAnswer');
+  results.mediaWebkitOffers = await run('webkit', 'mediaOffer');
+  results.mediaWebkitOffersChromiumSide = await answer;
+  answer = run('webkit', 'mediaAnswer');
+  results.mediaChromiumOffers = await run('chromium', 'mediaOffer');
+  results.mediaChromiumOffersWebkitSide = await answer;
   const c = results.conformance;
-  const conformanceOk = c.createAnswerInStable === 'InvalidStateError' && c.addTrack === 'NotSupportedError'
+  const conformanceOk = c.createAnswerInStable === 'InvalidStateError' && c.addTrack === 'TypeError'
     && c.addIceNoRemote === 'InvalidStateError' && c.sendBeforeOpen === 'InvalidStateError'
     && c.afterSetLocal === 'have-local-offer' && c.createAfterClose === 'InvalidStateError' && c.offerHasApplication && c.negotiationNeeded === true && c.matrixConfig === 'ok' && c.badSdp === 'OperationError' && c.badSdpState === 'stable';
   results.summary = {
@@ -86,12 +94,15 @@ try {
     conformanceOk,
     webkitOffers: results.webkitOffers.ok && results.webkitOffersChromiumSide.ok,
     chromiumOffers: results.chromiumOffers.ok && results.chromiumOffersWebkitSide.ok,
+    mediaWebkitOffers: results.mediaWebkitOffers.ok && results.mediaWebkitOffersChromiumSide.ok,
+    mediaChromiumOffers: results.mediaChromiumOffers.ok && results.mediaChromiumOffersWebkitSide.ok,
   };
   exitCode = Object.values(results.summary).every(Boolean) ? 0 : 1;
 } catch (e) {
   results.error = String(e.message || e);
 } finally {
   console.log(JSON.stringify({ mdns, results }, null, 2));
+  if (process.env.RESULT_FILE) (await import('node:fs')).writeFileSync(process.env.RESULT_FILE, JSON.stringify({ mdns, results }, null, 2));
   app.kill('SIGTERM');
   await browser.close();
   wss.close();

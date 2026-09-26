@@ -1,8 +1,8 @@
 "$schema" = "schemas/schema.json"
 
 [default]
-description = "Peer connections and data channels. Grants no capture (microphone, camera, screen)."
-permissions = ["allow-peer", "allow-data"]
+description = "Peer connections, data channels and media transport. Capture stays governed by the webview's own getUserMedia permissions."
+permissions = ["allow-peer", "allow-data", "allow-media"]
 
 [[set]]
 identifier = "allow-peer"
@@ -16,6 +16,7 @@ permissions = [
   "allow-pc-add-ice",
   "allow-pc-get-stats",
   "allow-pc-close",
+  "allow-pc-restart-ice",
 ]
 
 [[set]]
@@ -27,4 +28,13 @@ permissions = [
   "allow-dc-close",
   "allow-dc-buffered-amount",
   "allow-dc-set-threshold",
+]
+
+[[set]]
+identifier = "allow-media"
+description = "Send and receive encoded media on transceivers."
+permissions = [
+  "allow-pc-upsert-transceiver",
+  "allow-pc-request-keyframe",
+  "allow-media-push",
 ]

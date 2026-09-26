@@ -1,4 +1,4 @@
-// tauri-plugin-webrtc JS shim (fidelity level L1: peer connections + data channels).
+// tauri-plugin-webrtc JS shim: peer connections, data channels, transceivers and media.
 //
 // Installed only when the webview has no native RTCPeerConnection (or when the
 // plugin was built with force_shim). Every object is a handle to a resource in
@@ -215,6 +215,320 @@
   }
   defineHandlers(RTCDataChannel.prototype, ['open', 'message', 'close', 'closing', 'error', 'bufferedamountlow']);
 
+  // ================================================================ media
+  //
+  // Tracks stay native MediaStreamTracks, so the rest of the app (voice
+  // messages, level meters, device pickers) keeps working. The page does
+  // device I/O; video is coded with WebCodecs (VP8); the engine does transport.
+
+  const CODEC = { vp8: 1, vp9: 2, h264: 3, av1: 4, opus: 10 };
+  const MAX_W = 1280; const MAX_H = 720; const MAX_FPS = 30;
+  let audioCtx = null;
+  const ctx = () => (audioCtx = audioCtx || new AudioContext({ sampleRate: 48000 }));
+  const nowUs = () => Math.round(performance.now() * 1000);
+
+  function mediaHost() {
+    let el = document.getElementById('__tauri_webrtc_media');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = '__tauri_webrtc_media';
+      el.setAttribute('aria-hidden', 'true');
+      Object.assign(el.style, { position: 'fixed', left: '-4px', top: '-4px', width: '2px', height: '2px', overflow: 'hidden', opacity: '0.01', pointerEvents: 'none' });
+      (document.body || document.documentElement).appendChild(el);
+    }
+    return el;
+  }
+
+  // Sequential IPC for one sender: frames must reach the engine in order.
+  class FramePusher {
+    constructor(pc, txId) { this.pc = pc; this.txId = txId; this.q = []; this.busy = false; this.sent = 0; this.bytes = 0; this.dropped = 0; }
+    push(frame) {
+      if (this.q.length > 8) { // bounded latency: drop the backlog, ask for a keyframe
+        this.dropped += this.q.length; this.q.length = 0; this.onBacklog && this.onBacklog();
+        if (!frame.key) return;
+      }
+      this.q.push(frame); this._pump();
+    }
+    async _pump() {
+      if (this.busy) return; this.busy = true;
+      try {
+        const id = await this.pc._id;
+        while (this.q.length) {
+          const f = this.q.shift();
+          const t0 = performance.now();
+          await invoke('media_push', f.data, { headers: { 'x-pc': String(id), 'x-tx': String(this.txId), 'x-codec': String(f.codec), 'x-key': f.key ? '1' : '0', 'x-ts': String(f.ts) } });
+          this.ipcMs = (this.ipcMs || 0) + (performance.now() - t0);
+          this.sent++; this.bytes += f.data.byteLength;
+        }
+      } catch (e) { /* pc closed */ } finally { this.busy = false; }
+    }
+  }
+
+  class VideoSendPipe {
+    constructor(sender) {
+      this.sender = sender; this.track = null; this.video = null; this.encoder = null;
+      this.w = 0; this.h = 0; this.forceKey = true; this.lastFrameAt = 0; this.stopped = false;
+      this.bitrate = 1_000_000; this.maxBitrate = null; this.scale = 1; this.active = true;
+      this.framesEncoded = 0; this.keyFramesEncoded = 0;
+      this.pusher = new FramePusher(sender._tx._pc, sender._tx._id);
+      this.pusher.onBacklog = () => { this.forceKey = true; };
+    }
+    setTrack(track) {
+      if (track === this.track) return;
+      this.track = track; this.forceKey = true;
+      if (!track) { if (this.video) this.video.srcObject = null; return; }
+      if (!this.video) {
+        this.video = document.createElement('video');
+        this.video.muted = true; this.video.playsInline = true; this.video.autoplay = true;
+        mediaHost().appendChild(this.video);
+      }
+      this.video.srcObject = new MediaStream([track]);
+      this.video.play().catch(() => {});
+      this._schedule();
+    }
+    _schedule() {
+      if (this.stopped || !this.video) return;
+      if (this.video.requestVideoFrameCallback) this.video.requestVideoFrameCallback(() => this._tick());
+      else setTimeout(() => this._tick(), 1000 / MAX_FPS);
+    }
+    _configure(w, h) {
+      const s = Math.min(1, MAX_W / w, MAX_H / h) / this.scale;
+      this.w = Math.max(2, Math.round((w * s) / 2) * 2); this.h = Math.max(2, Math.round((h * s) / 2) * 2);
+      if (this.encoder && this.encoder.state !== 'closed') this.encoder.close();
+      this.encoder = new VideoEncoder({
+        output: (chunk) => {
+          const data = new Uint8Array(chunk.byteLength); chunk.copyTo(data);
+          const key = chunk.type === 'key'; this.framesEncoded++; if (key) this.keyFramesEncoded++;
+          this.pusher.push({ data, key, ts: chunk.timestamp, codec: CODEC.vp8 });
+        },
+        error: (e) => { console.warn('[tauri-webrtc] video encoder', e); this.encoder = null; },
+      });
+      const bitrate = Math.max(50_000, Math.min(this.bitrate, this.maxBitrate || Infinity));
+      this.encoder.configure({ codec: 'vp8', width: this.w, height: this.h, bitrate, framerate: MAX_FPS, latencyMode: 'realtime' });
+      this.srcW = w; this.srcH = h; this.forceKey = true;
+    }
+    _tick() {
+      if (this.stopped) return;
+      const v = this.video; const t = this.track;
+      try {
+        const now = performance.now();
+        if (t && t.readyState === 'live' && this.active && v.videoWidth && now - this.lastFrameAt >= 1000 / MAX_FPS - 2) {
+          if (!this.encoder || v.videoWidth !== this.srcW || v.videoHeight !== this.srcH) this._configure(v.videoWidth, v.videoHeight);
+          if (this.encoder && this.encoder.encodeQueueSize < 3) {
+            this.lastFrameAt = now;
+            let frame;
+            if (!t.enabled) { // disabled tracks send black, like browsers
+              const c = this._black || (this._black = document.createElement('canvas'));
+              c.width = this.w; c.height = this.h; const x = c.getContext('2d'); x.fillStyle = '#000'; x.fillRect(0, 0, this.w, this.h);
+              frame = new VideoFrame(c, { timestamp: nowUs() });
+            } else if (this.w === v.videoWidth && this.h === v.videoHeight) {
+              frame = new VideoFrame(v, { timestamp: nowUs() });
+            } else {
+              const c = this._scaled || (this._scaled = document.createElement('canvas'));
+              if (c.width !== this.w || c.height !== this.h) { c.width = this.w; c.height = this.h; }
+              c.getContext('2d').drawImage(v, 0, 0, this.w, this.h);
+              frame = new VideoFrame(c, { timestamp: nowUs() });
+            }
+            this.encoder.encode(frame, { keyFrame: this.forceKey }); this.forceKey = false; frame.close();
+          }
+        }
+      } catch (e) { console.warn('[tauri-webrtc] video send', e); }
+      this._schedule();
+    }
+    setBitrate(bps) {
+      const b = Math.round(bps * 0.9);
+      if (Math.abs(b - this.bitrate) / this.bitrate < 0.2) return;
+      this.bitrate = b; if (this.encoder) this._configure(this.srcW, this.srcH);
+    }
+    stop() { this.stopped = true; if (this.encoder && this.encoder.state !== 'closed') this.encoder.close(); if (this.video) { this.video.srcObject = null; this.video.remove(); } }
+    stats() { return { framesEncoded: this.framesEncoded, keyFramesEncoded: this.keyFramesEncoded, framesSent: this.pusher.sent, bytesSent: this.pusher.bytes, frameWidth: this.w, frameHeight: this.h, framesDropped: this.pusher.dropped, ipcMsPerFrame: this.pusher.sent ? +(this.pusher.ipcMs / this.pusher.sent).toFixed(2) : null }; }
+  }
+
+  class VideoRecvPipe {
+    constructor(tx) {
+      this.tx = tx;
+      this.canvas = document.createElement('canvas'); this.canvas.width = 2; this.canvas.height = 2;
+      this.c2d = this.canvas.getContext('2d');
+      this.track = this.canvas.captureStream().getVideoTracks()[0];
+      this.decoder = null; this.needKey = true; this.framesReceived = 0; this.framesDecoded = 0; this.bytes = 0; this.keyFramesDecoded = 0;
+      this.lastKeyReq = 0;
+    }
+    _decoder() {
+      if (this.decoder && this.decoder.state === 'configured') return this.decoder;
+      this.decoder = new VideoDecoder({
+        output: (f) => {
+          if (this.canvas.width !== f.displayWidth || this.canvas.height !== f.displayHeight) {
+            this.canvas.width = f.displayWidth; this.canvas.height = f.displayHeight;
+          }
+          this.c2d.drawImage(f, 0, 0); f.close(); this.framesDecoded++;
+        },
+        error: (e) => { console.warn('[tauri-webrtc] video decoder', e); this.needKey = true; this._askKey(); },
+      });
+      this.decoder.configure({ codec: 'vp8', optimizeForLatency: true });
+      return this.decoder;
+    }
+    _askKey() {
+      const now = performance.now(); if (now - this.lastKeyReq < 500) return; this.lastKeyReq = now;
+      this.tx._pc._id.then((id) => invoke('pc_request_keyframe', { id, tx: this.tx._id })).catch(() => {});
+    }
+    frame(codec, key, ts, data) {
+      this.framesReceived++; this.bytes += data.byteLength;
+      if (codec !== CODEC.vp8) return;
+      if (this.needKey && !key) { this._askKey(); return; }
+      this.needKey = false; if (key) this.keyFramesDecoded++;
+      try { this._decoder().decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: ts, data })); }
+      catch (e) { this.needKey = true; this.decoder = null; this._askKey(); }
+    }
+    stop() { if (this.decoder && this.decoder.state !== 'closed') this.decoder.close(); this.track.stop(); }
+    stats() { return { framesReceived: this.framesReceived, framesDecoded: this.framesDecoded, keyFramesDecoded: this.keyFramesDecoded, bytesReceived: this.bytes, frameWidth: this.canvas.width, frameHeight: this.canvas.height }; }
+  }
+
+  // Audio pipelines (engine-side Opus, AEC and jitter buffering) arrive with
+  // fidelity level L2. Until then the receiver track is a live silent track so
+  // `track` events and stream plumbing behave, and audio senders are inert.
+  class AudioRecvPipe {
+    constructor(tx) {
+      this.tx = tx; this.framesReceived = 0; this.bytes = 0;
+      try { this.dest = ctx().createMediaStreamDestination(); this.track = this.dest.stream.getAudioTracks()[0]; }
+      catch (e) { this.track = null; }
+    }
+    frame(codec, key, ts, data) { this.framesReceived++; this.bytes += data.byteLength; }
+    stop() { if (this.track) this.track.stop(); }
+    stats() { return { packetsReceived: this.framesReceived, bytesReceived: this.bytes }; }
+  }
+  class AudioSendPipe {
+    constructor(sender) { this.sender = sender; this.track = null; }
+    setTrack(t) { this.track = t; }
+    stop() {}
+    stats() { return {}; }
+  }
+
+  const AUDIO_CAPS = { codecs: [{ mimeType: 'audio/opus', clockRate: 48000, channels: 2, sdpFmtpLine: 'minptime=10;useinbandfec=1' }], headerExtensions: [] };
+  const VIDEO_CAPS = { codecs: [{ mimeType: 'video/VP8', clockRate: 90000 }, { mimeType: 'video/rtx', clockRate: 90000 }], headerExtensions: [] };
+  const capabilities = (kind) => (kind === 'audio' ? structuredClone(AUDIO_CAPS) : kind === 'video' ? structuredClone(VIDEO_CAPS) : null);
+
+  class RTCDTMFSender extends EventTarget {
+    constructor() { super(); this.toneBuffer = ''; }
+    get canInsertDTMF() { return false; }
+    insertDTMF() { throw new DOMException('DTMF is not supported yet', 'InvalidStateError'); }
+  }
+  defineHandlers(RTCDTMFSender.prototype, ['tonechange']);
+
+  class RTCRtpSender {
+    constructor(tx, track) {
+      this._tx = tx; this.track = track || null; this.transport = null; this.rtcpTransport = null;
+      this._everSent = !!track;
+      this.dtmf = tx.kind === 'audio' ? new RTCDTMFSender() : null;
+      this._params = { transactionId: '', encodings: [{ active: true }], codecs: [], headerExtensions: [], rtcp: { cname: '', reducedSize: true }, degradationPreference: 'balanced' };
+      this._pipe = null;
+    }
+    _setTrack(track) {
+      this.track = track || null; if (track) this._everSent = true;
+      if (!this._pipe && track) this._pipe = this._tx.kind === 'video' ? new VideoSendPipe(this) : new AudioSendPipe(this);
+      if (this._pipe) this._pipe.setTrack(this.track);
+    }
+    async replaceTrack(track) {
+      if (this._tx._pc._closed) throw new DOMException('RTCPeerConnection is closed', 'InvalidStateError');
+      if (track && track.kind !== this._tx.kind) throw new TypeError('track kind does not match the sender');
+      if (this._tx._stopping) throw new DOMException('transceiver is stopped', 'InvalidStateError');
+      this._setTrack(track);
+    }
+    getParameters() { return structuredClone({ ...this._params, transactionId: String(Math.random()).slice(2), codecs: capabilities(this._tx.kind).codecs }); }
+    async setParameters(p) {
+      if (!p || !Array.isArray(p.encodings)) throw new TypeError('encodings are required');
+      this._params.encodings = p.encodings.map((e) => ({ ...e }));
+      const e0 = p.encodings[0] || {};
+      if (this._pipe && this._tx.kind === 'video') {
+        this._pipe.active = e0.active !== false;
+        this._pipe.maxBitrate = e0.maxBitrate || null;
+        const sc = e0.scaleResolutionDownBy || 1;
+        if (sc !== this._pipe.scale) { this._pipe.scale = sc; this._pipe.srcW = 0; }
+      }
+    }
+    setStreams(...streams) {
+      this._tx._streamIds = streams.map((s) => s.id);
+      this._tx._pc._syncTx(this._tx); this._tx._pc._updateNegotiationNeeded();
+    }
+    async getStats() { return this._tx._pc.getStats(); }
+    static getCapabilities(kind) { return capabilities(kind); }
+  }
+
+  class RTCRtpReceiver {
+    constructor(tx) {
+      this._tx = tx; this.transport = null; this.rtcpTransport = null; this.jitterBufferTarget = null;
+      this._pipe = tx.kind === 'video' ? new VideoRecvPipe(tx) : new AudioRecvPipe(tx);
+      this.track = this._pipe.track;
+    }
+    getContributingSources() { return []; }
+    getSynchronizationSources() { return []; }
+    getParameters() { return { codecs: capabilities(this._tx.kind).codecs, headerExtensions: [], rtcp: { cname: '', reducedSize: true } }; }
+    async getStats() { return this._tx._pc.getStats(); }
+    static getCapabilities(kind) { return capabilities(kind); }
+  }
+
+  const DIRECTIONS = ['sendrecv', 'sendonly', 'recvonly', 'inactive'];
+  class RTCRtpTransceiver {
+    constructor(pc, { id, kind, direction, streamIds, senderTrackId, fromAddTrack, createdByRemote, track }) {
+      this._pc = pc; this._id = id; this.kind = kind;
+      this._direction = direction; this._streamIds = streamIds || [];
+      this._senderTrackId = senderTrackId || (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2));
+      this._fromAddTrack = !!fromAddTrack; this._createdByRemote = !!createdByRemote;
+      this._mid = null; this._currentDirection = null; this._negotiatedDirection = null;
+      this._stopping = false; this._stopped = false; this._receiving = false; this._recvStreams = [];
+      this._remote = { dir: null, streams: [], track: null };
+      this.sender = new RTCRtpSender(this, null);
+      this.receiver = new RTCRtpReceiver(this);
+      if (track) this.sender._setTrack(track);
+      this._codecPrefs = null;
+    }
+    get mid() { return this._mid; }
+    get currentDirection() { return this._stopped ? 'stopped' : this._currentDirection; }
+    get direction() { return this._stopping ? 'stopped' : this._direction; }
+    set direction(d) {
+      if (!DIRECTIONS.includes(d)) throw new TypeError(`invalid direction ${d}`);
+      if (this._stopping) throw new DOMException('transceiver is stopped', 'InvalidStateError');
+      if (d === this._direction) return;
+      this._direction = d; this._pc._syncTx(this); this._pc._updateNegotiationNeeded();
+    }
+    get stopped() { return this._stopped; }
+    stop() {
+      if (this._pc._closed) throw new DOMException('RTCPeerConnection is closed', 'InvalidStateError');
+      if (this._stopping) return;
+      this._stopping = true;
+      if (this.sender._pipe) this.sender._pipe.stop();
+      this.sender.track = null;
+      this.receiver._pipe.stop();
+      this._pc._removeRemoteTrack(this);
+      this._pc._syncTx(this); this._pc._updateNegotiationNeeded();
+    }
+    setCodecPreferences(codecs) {
+      const caps = capabilities(this.kind).codecs.map((c) => c.mimeType.toLowerCase());
+      for (const c of codecs || []) {
+        if (!caps.includes(String(c.mimeType).toLowerCase())) throw new DOMException(`unsupported codec ${c.mimeType}`, 'InvalidModificationError');
+      }
+      this._codecPrefs = codecs && codecs.length ? codecs : null;
+    }
+    _spec() {
+      return {
+        id: this._id, kind: this.kind, direction: this._stopping ? 'stopped' : this._direction,
+        streamIds: this._streamIds, senderTrackId: this._senderTrackId, fromAddTrack: this._fromAddTrack, stopped: this._stopping,
+      };
+    }
+  }
+
+  class RTCTrackEvent extends Event {
+    constructor(type, init = {}) {
+      super(type, init);
+      this.receiver = init.receiver; this.track = init.track; this.streams = init.streams || []; this.transceiver = init.transceiver;
+    }
+  }
+
+  function trackEvent(type, track) {
+    try { return new MediaStreamTrackEvent(type, { track }); } catch { return Object.assign(new Event(type), { track }); }
+  }
+
+  // ======================================================= peer connection
+
   class RTCPeerConnection extends EventTarget {
     constructor(configuration = {}) {
       super();
@@ -233,9 +547,15 @@
       this._currentLocal = null; this._currentRemote = null;
       this._channels = new Map();   // handle -> RTCDataChannel
       this._orphans = new Map();    // handle -> [events] that arrived before registration
+      this._txs = new Map();        // id -> RTCRtpTransceiver, in creation order
+      this._nextTx = 1;
+      this._remoteStreams = new Map(); // remote msid stream id -> MediaStream
       this._closed = false;
       this._chain = Promise.resolve();
+      this._opsPending = 0;
       this._negotiationNeeded = false;
+      this._nnFired = false;
+      this._pendingDataNegotiation = false;
       const channel = new OrderedChannel((m) => this._onEngine(m));
       this._id = invoke('pc_create', { config: this._config, channel });
       this._id.catch(() => {});
@@ -255,7 +575,7 @@
     _check() { if (this._closed) throw new DOMException('RTCPeerConnection is closed', 'InvalidStateError'); }
     _enqueue(fn) {
       if (this._closed) return Promise.reject(new DOMException('RTCPeerConnection is closed', 'InvalidStateError'));
-      this._opsPending = (this._opsPending || 0) + 1;
+      this._opsPending++;
       const p = this._chain.then(fn).finally(() => {
         if (--this._opsPending === 0) setTimeout(() => this._maybeFireNegotiationNeeded(), 0);
       });
@@ -266,36 +586,170 @@
       if (this.signalingState === s) return;
       this.signalingState = s;
       this.dispatchEvent(new Event('signalingstatechange'));
-      if (s === 'stable' && this._pendingDataNegotiation && !this._hasSctp()) {
-        this._negotiationNeeded = false;
-        this._updateNegotiationNeeded();
-      }
+      if (s === 'stable') { this._negotiationNeeded = false; this._updateNegotiationNeeded(); }
     }
 
-    // webrtcbin does not emit negotiation-needed for data channels, so apply
-    // the W3C rule here: the first channel on a connection without an
-    // application m-line needs negotiation, fired once the chain is idle and
-    // signaling is stable.
+    // ---- negotiation-needed (W3C "check if negotiation is needed") ----
     _hasSctp() {
-      const has = (d) => d && /\r?\nm=application /.test("\n" + d.sdp);
+      const has = (d) => d && /\r?\nm=application /.test('\n' + d.sdp);
       return has(this._currentLocal) || has(this._currentRemote) || has(this._local);
     }
+    _needsNegotiation() {
+      if (this._pendingDataNegotiation && !this._hasSctp()) return true;
+      for (const t of this._txs.values()) {
+        if (t._stopping && t._mid && !t._stopped) return true;
+        if (t._stopping) continue;
+        if (!t._mid) return true;
+        if (t._negotiatedDirection !== null && t._direction !== t._negotiatedDirection) return true;
+      }
+      return false;
+    }
     _updateNegotiationNeeded() {
-      if (this._closed || this._negotiationNeeded) return;
-      this._negotiationNeeded = true;
-      this._nnFired = false;
+      if (this._closed) return;
       setTimeout(() => this._maybeFireNegotiationNeeded(), 0);
     }
     _maybeFireNegotiationNeeded() {
-      if (this._closed || !this._negotiationNeeded || this._nnFired) return;
-      if (this._opsPending > 0 || this.signalingState !== "stable") return;
-      this._nnFired = true;
-      this.dispatchEvent(new Event("negotiationneeded"));
+      if (this._closed || this._opsPending > 0 || this.signalingState !== 'stable') return;
+      if (!this._needsNegotiation()) { this._negotiationNeeded = false; this._nnFired = false; return; }
+      if (this._negotiationNeeded && this._nnFired) return;
+      this._negotiationNeeded = true; this._nnFired = true;
+      this.dispatchEvent(new Event('negotiationneeded'));
+    }
+
+    // ---- transceivers ----
+    _syncTx(t) {
+      const spec = t._spec();
+      this._enqueue(async () => invoke('pc_upsert_transceiver', { id: await this._id, spec })).catch(() => {});
+    }
+    _addTransceiverInternal(kind, init) {
+      const t = new RTCRtpTransceiver(this, { id: this._nextTx++, kind, ...init });
+      this._txs.set(t._id, t);
+      this._syncTx(t);
+      return t;
+    }
+    getTransceivers() { return [...this._txs.values()]; }
+    getSenders() { return this.getTransceivers().filter((t) => !t._stopped).map((t) => t.sender); }
+    getReceivers() { return this.getTransceivers().filter((t) => !t._stopped).map((t) => t.receiver); }
+
+    addTrack(track, ...streams) {
+      this._check();
+      if (!track || (track.kind !== 'audio' && track.kind !== 'video')) throw new TypeError('addTrack needs a MediaStreamTrack');
+      if (this.getSenders().some((s) => s.track === track)) throw new DOMException('track already added', 'InvalidAccessError');
+      const streamIds = streams.map((s) => s.id);
+      const reuse = this.getTransceivers().find((t) => !t._stopping && t.kind === track.kind && !t.sender.track && !t.sender._everSent
+        && !(t._currentDirection && (t._currentDirection === 'sendrecv' || t._currentDirection === 'sendonly')));
+      if (reuse) {
+        reuse._streamIds = streamIds;
+        reuse.sender._setTrack(track);
+        if (reuse._direction === 'recvonly') reuse._direction = 'sendrecv';
+        else if (reuse._direction === 'inactive') reuse._direction = 'sendonly';
+        this._syncTx(reuse); this._updateNegotiationNeeded();
+        return reuse.sender;
+      }
+      const t = this._addTransceiverInternal(track.kind, { direction: 'sendrecv', streamIds, fromAddTrack: true, track });
+      this._updateNegotiationNeeded();
+      return t.sender;
+    }
+    removeTrack(sender) {
+      this._check();
+      const t = this.getTransceivers().find((x) => x.sender === sender);
+      if (!t) throw new DOMException('sender does not belong to this connection', 'InvalidAccessError');
+      if (!sender.track) return;
+      sender._setTrack(null);
+      if (t._direction === 'sendrecv') t._direction = 'recvonly';
+      else if (t._direction === 'sendonly') t._direction = 'inactive';
+      this._syncTx(t); this._updateNegotiationNeeded();
+    }
+    addTransceiver(trackOrKind, init = {}) {
+      this._check();
+      const track = typeof trackOrKind === 'string' ? null : trackOrKind;
+      const kind = track ? track.kind : trackOrKind;
+      if (kind !== 'audio' && kind !== 'video') throw new TypeError(`invalid kind ${kind}`);
+      const direction = init.direction || 'sendrecv';
+      if (!DIRECTIONS.includes(direction)) throw new TypeError(`invalid direction ${direction}`);
+      const streamIds = (init.streams || []).map((s) => s.id);
+      const t = this._addTransceiverInternal(kind, { direction, streamIds, fromAddTrack: false, track });
+      if (init.sendEncodings && init.sendEncodings.length) t.sender._params.encodings = init.sendEncodings.map((e) => ({ ...e }));
+      this._updateNegotiationNeeded();
+      return t;
+    }
+
+    _stream(id) {
+      let s = this._remoteStreams.get(id);
+      if (!s) {
+        s = new MediaStream();
+        // matrix-js-sdk keys sdp_stream_metadata on the remote msid stream id.
+        Object.defineProperty(s, 'id', { value: id, configurable: true });
+        this._remoteStreams.set(id, s);
+      }
+      return s;
+    }
+    _removeRemoteTrack(t) {
+      if (!t._receiving) return;
+      t._receiving = false;
+      const track = t.receiver.track;
+      for (const s of t._recvStreams) {
+        if (track) { try { s.removeTrack(track); } catch {} s.dispatchEvent(trackEvent('removetrack', track)); }
+      }
+      t._recvStreams = [];
+    }
+    // W3C "process remote tracks" after a remote description is applied.
+    _processRemoteTracks() {
+      const events = [];
+      for (const t of this._txs.values()) {
+        if (!t._mid || t._stopping) continue;
+        const d = t._remote.dir;
+        const sends = d === 'sendrecv' || d === 'sendonly';
+        const track = t.receiver.track;
+        if (sends && track) {
+          const streams = (t._remote.streams.length ? t._remote.streams : []).map((id) => this._stream(id));
+          if (!t._receiving) {
+            t._receiving = true;
+            for (const s of streams) if (!s.getTracks().includes(track)) s.addTrack(track);
+            t._recvStreams = streams;
+            events.push(new RTCTrackEvent('track', { receiver: t.receiver, track, streams, transceiver: t }));
+          } else {
+            for (const s of t._recvStreams) if (!streams.includes(s)) { try { s.removeTrack(track); } catch {} s.dispatchEvent(trackEvent('removetrack', track)); }
+            for (const s of streams) if (!t._recvStreams.includes(s)) { s.addTrack(track); s.dispatchEvent(trackEvent('addtrack', track)); }
+            t._recvStreams = streams;
+          }
+        } else if (!sends) {
+          this._removeRemoteTrack(t);
+        }
+      }
+      for (const e of events) this.dispatchEvent(e);
+    }
+    _applyStates(states, { remote, answerApplied }) {
+      const seen = new Set();
+      for (const st of states) {
+        seen.add(st.id);
+        let t = this._txs.get(st.id);
+        if (!t) {
+          t = new RTCRtpTransceiver(this, { id: st.id, kind: st.kind, direction: st.direction, streamIds: [], senderTrackId: st.senderTrackId, fromAddTrack: false, createdByRemote: true });
+          this._txs.set(st.id, t);
+        }
+        const wasSending = t._currentDirection === 'sendrecv' || t._currentDirection === 'sendonly';
+        t._mid = st.mid;
+        if (st.currentDirection === 'stopped') { t._stopped = true; t._stopping = true; }
+        else t._currentDirection = st.currentDirection;
+        t._remote = { dir: st.remoteDirection, streams: st.remoteStreamIds || [], track: st.remoteTrackId };
+        if (answerApplied && t._mid) t._negotiatedDirection = t._direction;
+        const sending = t._currentDirection === 'sendrecv' || t._currentDirection === 'sendonly';
+        if (sending && !wasSending && t.sender._pipe) t.sender._pipe.forceKey = true;
+      }
+      for (const [id, t] of this._txs) {
+        if (!seen.has(id) && t._createdByRemote) { this._removeRemoteTrack(t); t.receiver._pipe.stop(); this._txs.delete(id); }
+      }
+      if (remote) this._processRemoteTracks();
     }
 
     createOffer(options) {
       if (typeof options === 'function') return Promise.reject(new TypeError('legacy callback API is not supported'));
-      return this._enqueue(async () => new RTCSessionDescription(await invoke('pc_create_offer', { id: await this._id })));
+      return this._enqueue(async () => {
+        const id = await this._id;
+        if (options && options.iceRestart) await invoke('pc_restart_ice', { id });
+        return new RTCSessionDescription(await invoke('pc_create_offer', { id }));
+      });
     }
     createAnswer(options) {
       if (typeof options === 'function') return Promise.reject(new TypeError('legacy callback API is not supported'));
@@ -311,17 +765,25 @@
       return this._enqueue(async () => {
         const id = await this._id;
         let d = desc && desc.sdp ? { type: desc.type, sdp: desc.sdp } : null;
+        if (desc && desc.type === 'rollback') d = { type: 'rollback', sdp: '' };
         if (!d) {
           const type = desc && desc.type ? desc.type
             : (this.signalingState === 'have-remote-offer' || this.signalingState === 'have-local-pranswer') ? 'answer' : 'offer';
           const made = await invoke(type === 'offer' ? 'pc_create_offer' : 'pc_create_answer', { id });
           d = { type, sdp: made.sdp };
         }
-        if (d.type === 'rollback') throw new DOMException('rollback is not supported', 'NotSupportedError');
-        await invoke('pc_set_local', { id, desc: d });
+        const states = await invoke('pc_set_local', { id, desc: d });
+        if (d.type === 'rollback') {
+          const wasRemote = this.signalingState === 'have-remote-offer';
+          if (wasRemote) this._remote = this._currentRemote; else this._local = this._currentLocal;
+          this._applyStates(states, { remote: wasRemote, answerApplied: false });
+          this._setSignaling('stable');
+          return;
+        }
         if (d.type === 'offer') { this._negotiationNeeded = false; this._nnFired = false; }
         if (/\r?\nm=application /.test('\n' + d.sdp)) this._pendingDataNegotiation = false;
         this._local = new RTCSessionDescription(d);
+        this._applyStates(states, { remote: false, answerApplied: d.type === 'answer' });
         if (d.type === 'answer') {
           this._currentLocal = this._local; this._currentRemote = this._remote;
           this._setSignaling('stable');
@@ -333,16 +795,30 @@
     setRemoteDescription(desc) {
       return this._enqueue(async () => {
         if (!desc || !desc.type) throw new TypeError('description needs a type');
-        if (desc.type === 'rollback') throw new DOMException('rollback is not supported', 'NotSupportedError');
         const d = { type: desc.type, sdp: desc.sdp || '' };
-        await invoke('pc_set_remote', { id: await this._id, desc: d });
+        const id = await this._id;
+        if (d.type === 'offer' && this.signalingState === 'have-local-offer') {
+          // Implicit rollback (perfect negotiation, polite side).
+          this._local = this._currentLocal;
+        }
+        const states = await invoke('pc_set_remote', { id, desc: d });
+        if (d.type === 'rollback') {
+          this._remote = this._currentRemote;
+          this._applyStates(states, { remote: true, answerApplied: false });
+          this._setSignaling('stable');
+          return;
+        }
         this._remote = new RTCSessionDescription(d);
         if (this.canTrickleIceCandidates === null) this.canTrickleIceCandidates = /a=ice-options:[^\r\n]*trickle/.test(d.sdp);
         if (d.type === 'answer') {
           this._currentLocal = this._local; this._currentRemote = this._remote;
+          this._applyStates(states, { remote: true, answerApplied: true });
           this._setSignaling('stable');
-        } else if (d.type === 'offer') this._setSignaling('have-remote-offer');
-        else this._setSignaling('have-remote-pranswer');
+        } else if (d.type === 'offer') {
+          if (this.signalingState === 'have-local-offer') this.signalingState = 'stable'; // rolled back
+          this._applyStates(states, { remote: true, answerApplied: false });
+          this._setSignaling('have-remote-offer');
+        } else this._setSignaling('have-remote-pranswer');
       });
     }
 
@@ -354,6 +830,15 @@
         if (c.sdpMid == null && c.sdpMLineIndex == null) throw new TypeError('candidate needs sdpMid or sdpMLineIndex');
         await invoke('pc_add_ice', { id: await this._id, candidate: { candidate: c.candidate, sdpMid: c.sdpMid ?? null, sdpMLineIndex: c.sdpMLineIndex ?? null } });
       });
+    }
+
+    restartIce() {
+      if (this._closed) return;
+      this._id.then((id) => invoke('pc_restart_ice', { id })).catch(() => {});
+      this._restartPending = true;
+      // A restart needs an offer even if nothing else changed.
+      this._negotiationNeeded = false; this._nnFired = false;
+      setTimeout(() => { if (!this._closed && this.signalingState === 'stable') { this._nnFired = true; this.dispatchEvent(new Event('negotiationneeded')); } }, 0);
     }
 
     createDataChannel(label, init = {}) {
@@ -405,9 +890,16 @@
       if (this._closed) return;
       if (m instanceof ArrayBuffer || ArrayBuffer.isView(m) || Array.isArray(m)) {
         const bytes = m instanceof ArrayBuffer ? new Uint8Array(m) : Array.isArray(m) ? Uint8Array.from(m) : new Uint8Array(m.buffer, m.byteOffset, m.byteLength);
-        const handle = new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
+        const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const handle = dv.getUint32(0, true);
+        const kind = bytes[4];
+        if (kind === 2) { // media frame
+          const t = this._txs.get(handle);
+          if (t && !t._stopping) t.receiver._pipe.frame(bytes[6], (bytes[5] & 1) === 1, Number(dv.getBigUint64(8, true)), bytes.subarray(16));
+          return;
+        }
         const dc = this._dc(handle, m);
-        if (dc) dc._onMessage(bytes[4], bytes.subarray(5));
+        if (dc) dc._onMessage(kind, bytes.subarray(5));
         return;
       }
       switch (m.type) {
@@ -427,6 +919,14 @@
           break; // tracked in JS so it is correct when each promise resolves
         case 'negotiationneeded':
           this._updateNegotiationNeeded();
+          break;
+        case 'keyframerequest': {
+          const t = this._txs.get(m.tx);
+          if (t && t.sender._pipe) t.sender._pipe.forceKey = true;
+          break;
+        }
+        case 'targetbitrate':
+          for (const t of this._txs.values()) if (t.kind === 'video' && t.sender._pipe && t.sender._pipe.setBitrate) t.sender._pipe.setBitrate(m.bps);
           break;
         case 'datachannel': {
           const c = m.channel;
@@ -449,25 +949,24 @@
       }
     }
 
-    async getStats() {
+    async getStats(selector) {
       const raw = await invoke('pc_get_stats', { id: await this._id });
       const report = new Map();
+      const ts = performance.timeOrigin + performance.now();
       for (const [key, entry] of Object.entries(raw)) {
-        const s = {};
+        const s = { timestamp: ts };
         for (const [k, v] of Object.entries(entry)) s[camel(k)] = v;
         s.id = s.id || key;
         report.set(s.id, s);
       }
+      for (const t of this._txs.values()) {
+        if (!t._mid) continue;
+        if (t.receiver._pipe) report.set(`IN${t._id}`, { id: `IN${t._id}`, type: 'inbound-rtp', kind: t.kind, mid: t._mid, timestamp: ts, trackIdentifier: t.receiver.track && t.receiver.track.id, ...t.receiver._pipe.stats() });
+        if (t.sender._pipe) report.set(`OUT${t._id}`, { id: `OUT${t._id}`, type: 'outbound-rtp', kind: t.kind, mid: t._mid, timestamp: ts, ...t.sender._pipe.stats() });
+      }
+      if (selector) for (const [k, v] of [...report]) if (v.kind && v.kind !== selector.kind) report.delete(k);
       return report;
     }
-
-    getSenders() { return []; }
-    getReceivers() { return []; }
-    getTransceivers() { return []; }
-    addTrack() { throw new DOMException('media tracks are not supported by this shim yet (fidelity level L1)', 'NotSupportedError'); }
-    addTransceiver() { throw new DOMException('transceivers are not supported by this shim yet (fidelity level L1)', 'NotSupportedError'); }
-    removeTrack() { throw new DOMException('media tracks are not supported by this shim yet (fidelity level L1)', 'NotSupportedError'); }
-    restartIce() {}
 
     close() {
       if (this._closed) return;
@@ -476,6 +975,11 @@
       this.iceConnectionState = 'closed';
       this.connectionState = 'closed';
       for (const dc of this._channels.values()) dc.readyState = 'closed';
+      for (const t of this._txs.values()) {
+        t._stopping = true; t._stopped = true;
+        if (t.sender._pipe) t.sender._pipe.stop();
+        t.receiver._pipe.stop();
+      }
       this._id.then((id) => invoke('pc_close', { id })).catch(() => {});
     }
 
@@ -490,11 +994,12 @@
 
   const expose = {
     RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, RTCDataChannel,
-    RTCPeerConnectionIceEvent, RTCDataChannelEvent,
+    RTCPeerConnectionIceEvent, RTCDataChannelEvent, RTCTrackEvent,
+    RTCRtpSender, RTCRtpReceiver, RTCRtpTransceiver, RTCDTMFSender,
   };
   for (const [name, value] of Object.entries(expose)) {
     Object.defineProperty(window, name, { value, writable: true, configurable: true, enumerable: false });
   }
   Object.defineProperty(window, 'webkitRTCPeerConnection', { value: RTCPeerConnection, writable: true, configurable: true });
-  Object.defineProperty(RTCPeerConnection, '__tauriShim', { value: { level: 'L1', engine: info.engine } });
+  Object.defineProperty(RTCPeerConnection, '__tauriShim', { value: { level: 'L2-video', engine: info.engine } });
 })();

@@ -46,6 +46,9 @@ async function shimConformance() {
   return out;
 }
 
+let __log = () => {};
+function plog(...a) { try { __log(a.map((x) => typeof x === 'string' ? x : JSON.stringify(x)).join(' ')); } catch {} }
+
 function makeSignal(ws) {
   const handlers = [];
   ws.addEventListener('message', (e) => {
@@ -150,6 +153,7 @@ async function roleAnswer(sig) {
       sig.send({ kind: 'sdp', desc: pc.localDescription.toJSON ? pc.localDescription.toJSON() : pc.localDescription });
       await flush();
     } else if (m.kind === 'done') res();
+    if (m.kind === 'done') plog('mediaAnswer: done');
   }));
   await finished;
   await new Promise((r) => setTimeout(r, 300));
@@ -161,6 +165,7 @@ async function roleAnswer(sig) {
 function connectHarness(name, url, log = console.log) {
   const ws = new WebSocket(url);
   const sig = makeSignal(ws);
+  __log = (msg) => ws.readyState === 1 && ws.send(JSON.stringify({ t: 'log', name, msg }));
   ws.onopen = () => { ws.send(JSON.stringify({ t: 'hello', name, env: describeEnv() })); log('connected'); };
   ws.onmessage = async (e) => {
     const m = JSON.parse(e.data);
@@ -172,6 +177,8 @@ function connectHarness(name, url, log = console.log) {
       if (m.what === 'conformance') result = await shimConformance();
       else if (m.what === 'offer') result = await roleOffer(sig, m.opts);
       else if (m.what === 'answer') result = await roleAnswer(sig);
+      else if (m.what === 'mediaOffer') result = await roleMediaOffer(sig);
+      else if (m.what === 'mediaAnswer') result = await roleMediaAnswer(sig);
     } catch (err) {
       result = { ok: false, error: `${err && err.name}: ${err && err.message}` };
     }
@@ -179,4 +186,122 @@ function connectHarness(name, url, log = console.log) {
     ws.send(JSON.stringify({ t: 'result', name, what: m.what, result }));
   };
   return ws;
+}
+
+// ------------------------------------------------------------------ media
+function canvasTrack(label) {
+  const c = document.createElement('canvas'); c.width = 320; c.height = 240;
+  const x = c.getContext('2d'); let i = 0;
+  const iv = setInterval(() => {
+    x.fillStyle = `hsl(${(i * 7) % 360},70%,45%)`; x.fillRect(0, 0, 320, 240);
+    x.fillStyle = '#fff'; x.font = '28px sans-serif'; x.fillText(`${label} ${i++}`, 20, 130);
+  }, 33);
+  const stream = c.captureStream(30);
+  return { stream, track: stream.getVideoTracks()[0], stop: () => clearInterval(iv) };
+}
+
+async function watchRemote(track) {
+  const v = document.createElement('video'); v.muted = true; v.playsInline = true; v.autoplay = true;
+  Object.assign(v.style, { width: '160px', height: '120px' }); document.body.appendChild(v);
+  v.srcObject = new MediaStream([track]);
+  v.play().catch(() => {});
+  for (let k = 0; k < 100 && !v.videoWidth; k++) await new Promise((r) => setTimeout(r, 100));
+  return `${v.videoWidth}x${v.videoHeight}`;
+}
+
+async function inboundVideo(pc) {
+  let r = null;
+  (await pc.getStats()).forEach((s) => { if (s.type === 'inbound-rtp' && s.kind === 'video') r = { framesDecoded: s.framesDecoded || 0, frameWidth: s.frameWidth, keyFramesDecoded: s.keyFramesDecoded }; });
+  return r;
+}
+
+async function roleMediaOffer(sig) {
+  const pc = new RTCPeerConnection();
+  const flush = wirePeer(pc, sig);
+  const peerReport = new Promise((res) => sig.on((m) => { if (m.kind === 'report') res(m); }));
+  const src = canvasTrack('offer');
+  const nnEvents = [];
+  pc.onnegotiationneeded = () => nnEvents.push(pc.signalingState);
+  const sender = pc.addTrack(src.track, src.stream);
+  const txOk = pc.getTransceivers().some((t) => t.sender === sender);
+  const gotTrack = new Promise((res) => (pc.ontrack = (e) => res({ streamId: e.streams[0] && e.streams[0].id, kind: e.track.kind, track: e.track, stream: e.streams[0] })));
+  let remoteStreamId = null;
+  const answered = new Promise((res) => sig.on(async (m) => {
+    if (m.kind === 'sdp' && m.desc.type === 'answer' && !m.round) { remoteStreamId = m.streamId; await pc.setRemoteDescription(m.desc); await flush(); res(); }
+  }));
+  plog('mediaOffer: creating offer');
+  await pc.setLocalDescription(await pc.createOffer());
+  plog('mediaOffer: offer set', pc.signalingState);
+  sig.send({ kind: 'sdp', desc: pc.localDescription.toJSON ? pc.localDescription.toJSON() : pc.localDescription, streamId: src.stream.id });
+  await answered;
+  plog('mediaOffer: answered', pc.signalingState, pc.getTransceivers().map((t) => [t.mid, t.currentDirection]));
+  const t = await Promise.race([gotTrack, new Promise((r) => setTimeout(() => r(null), 8000))]);
+  plog('mediaOffer: track', !!t, pc.connectionState);
+  const tw = performance.now(); const rendered = t ? await watchRemote(t.track) : null; plog('watchRemote ms', Math.round(performance.now() - tw));
+  plog('mediaOffer: rendered', rendered);
+  await new Promise((r) => setTimeout(r, 3000));
+  const inbound = await inboundVideo(pc);
+  const tx = pc.getTransceivers()[0];
+  { const t0 = performance.now(); const st = await pc.getStats(); let out = null; st.forEach((x) => { if (x.type === 'outbound-rtp') out = x; }); plog('mediaOffer: inbound', inbound, 'outbound', out, 'getStats ms', Math.round(performance.now() - t0)); }
+  const state1 = { mid: tx.mid, currentDirection: tx.currentDirection, direction: tx.direction };
+
+  // Renegotiate: remove our track; the remote must see removetrack.
+  const reneg = new Promise((res) => sig.on(async (m) => {
+    if (m.kind === 'sdp' && m.desc.type === 'answer' && m.round === 2) { plog('mediaOffer: round2 answer received'); try { await pc.setRemoteDescription(m.desc); plog('mediaOffer: round2 answer applied'); } catch (e) { plog('mediaOffer: round2 apply failed', e.name, e.message); } res(); }
+  }));
+  const nnBefore = nnEvents.length;
+  pc.removeTrack(sender);
+  await new Promise((r) => setTimeout(r, 100));
+  const nnFired = nnEvents.length > nnBefore;
+  await pc.setLocalDescription(await pc.createOffer());
+  sig.send({ kind: 'sdp', desc: pc.localDescription.toJSON ? pc.localDescription.toJSON() : pc.localDescription, round: 2 });
+  plog('mediaOffer: round2 offer sent', nnFired);
+  await reneg;
+  plog('mediaOffer: round2 answered', tx.currentDirection);
+  const state2 = { currentDirection: tx.currentDirection, direction: tx.direction };
+  const peerSaw = await Promise.race([peerReport, new Promise((r) => setTimeout(() => r({ removed: 'no report' }), 5000))]);
+  src.stop(); sig.send({ kind: 'done' });
+  pc.close();
+  const ok = txOk && !!t && t.kind === 'video' && t.streamId === remoteStreamId && !!inbound && inbound.framesDecoded > 10
+    && rendered && rendered !== '0x0' && state1.currentDirection === 'sendrecv' && nnFired && state2.currentDirection === 'recvonly'
+    && peerSaw.removed === true;
+  return { ok, txOk, ontrackStreamMatches: t && t.streamId === remoteStreamId, rendered, inbound, state1, state2, nnFired, peerSaw };
+}
+
+async function roleMediaAnswer(sig) {
+  const pc = new RTCPeerConnection();
+  const flush = wirePeer(pc, sig);
+  const src = canvasTrack('answer');
+  let remoteStreamId = null; let removed = false; let trackInfo = null; let measured = {};
+  pc.ontrack = (e) => {
+    const s = e.streams[0];
+    trackInfo = { kind: e.track.kind, streamId: s && s.id, track: e.track, render: watchRemote(e.track) };
+    if (s) s.addEventListener('removetrack', () => { removed = s.getTracks().length === 0; });
+  };
+  const done = new Promise((res) => sig.on(async (m) => {
+    if (m.kind === 'sdp' && m.desc.type === 'offer' && !m.round) {
+      remoteStreamId = m.streamId;
+      plog('mediaAnswer: got offer');
+      await pc.setRemoteDescription(m.desc);
+      plog('mediaAnswer: remote set', pc.getTransceivers().length);         // matrix-js-sdk inbound flow:
+      pc.addTrack(src.track, src.stream);            // tracks added after the offer
+      await pc.setLocalDescription(await pc.createAnswer());
+      plog('mediaAnswer: answer set', pc.signalingState);
+      sig.send({ kind: 'sdp', desc: pc.localDescription.toJSON ? pc.localDescription.toJSON() : pc.localDescription, streamId: src.stream.id });
+      await flush();
+    } else if (m.kind === 'sdp' && m.round === 2) {
+      measured = { rendered: trackInfo ? await trackInfo.render : null, inbound: await inboundVideo(pc) };
+      plog('mediaAnswer: round2 offer');
+      const wd = setTimeout(() => plog('mediaAnswer: round2 setRemote still pending', pc.signalingState, JSON.stringify(m.desc.sdp)), 3000);
+      try { await pc.setRemoteDescription(m.desc); clearTimeout(wd); plog('mediaAnswer: round2 remote set'); } catch (e) { clearTimeout(wd); plog('mediaAnswer: round2 setRemote failed', e.name + ': ' + e.message); plog(m.desc.sdp); throw e; }
+      try { const a = await pc.createAnswer(); plog('mediaAnswer: round2 answer created'); await pc.setLocalDescription(a); plog('mediaAnswer: round2 answer set', pc.signalingState); } catch (e) { plog('mediaAnswer: round2 answer failed', e.name + ': ' + e.message); throw e; }
+      sig.send({ kind: 'sdp', desc: pc.localDescription.toJSON ? pc.localDescription.toJSON() : pc.localDescription, round: 2 });
+      await new Promise((r) => setTimeout(r, 300));
+      sig.send({ kind: 'report', removed });
+    } else if (m.kind === 'done') res();
+  }));
+  await done;
+  src.stop(); pc.close();
+  const { rendered, inbound } = measured;
+  return { ok: !!trackInfo && trackInfo.streamId === remoteStreamId && removed && rendered && rendered !== '0x0' && inbound && inbound.framesDecoded > 10, ontrackStreamMatches: trackInfo && trackInfo.streamId === remoteStreamId, removed, inbound, rendered };
 }

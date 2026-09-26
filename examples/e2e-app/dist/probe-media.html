@@ -1,0 +1,56 @@
+<!doctype html><html><head><meta charset="utf-8"></head><body><canvas id=c width=320 height=240></canvas><video id=v muted autoplay playsinline></video>
+<script>
+const out = {};
+let ws; const wsReady = new Promise((r) => { ws = new WebSocket(window.__E2E_WS__); ws.onopen = r; });
+const t = async (name, f) => { try { out[name] = await Promise.race([f(), new Promise((_, j) => setTimeout(() => j(new Error('hung 6s')), 6000))]); } catch (e) { out[name] = 'throw ' + (e && e.name) + ': ' + (e && e.message); } await wsReady; ws.send(JSON.stringify({ step: name, value: out[name] })); };
+(async () => {
+  await t('devices', async () => (await navigator.mediaDevices.enumerateDevices()).map(d => d.kind + ':' + (d.label || '?')).join(','));
+  await t('gumAudio', async () => { const s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false } }); const tr = s.getAudioTracks()[0]; window.__mic = s; return tr.label + ' ' + JSON.stringify(tr.getSettings()); });
+  await t('gumVideo', async () => { const s = await navigator.mediaDevices.getUserMedia({ video: true }); return s.getVideoTracks()[0].label; });
+  await t('gdm', async () => { const s = await navigator.mediaDevices.getDisplayMedia({ video: true }); return s.getVideoTracks()[0].label; });
+  await t('audioWorklet', async () => typeof AudioWorkletNode + ' ' + typeof (new AudioContext()).audioWorklet);
+  await t('msDest', async () => { const ac = new AudioContext(); const d = ac.createMediaStreamDestination(); const o = ac.createOscillator(); o.connect(d); o.start(); return d.stream.getAudioTracks().length + ' ' + (d.stream instanceof MediaStream); });
+  await t('workletPCM', async () => {
+    const ac = new AudioContext({ sampleRate: 48000 });
+    const code = `class P extends AudioWorkletProcessor { constructor(){super();this.n=0;} process(i){ if(i[0]&&i[0][0]){ this.n+=i[0][0].length; if(this.n>=48000){ this.port.postMessage(this.n); this.n=-1e12; } } return true; } } registerProcessor('p', P);`;
+    await ac.audioWorklet.addModule(URL.createObjectURL(new Blob([code], { type: 'application/javascript' })));
+    const node = new AudioWorkletNode(ac, 'p');
+    const o = ac.createOscillator(); o.connect(node); o.start();
+    await ac.resume();
+    return await new Promise((r) => { node.port.onmessage = (e) => r('frames ' + e.data + ' state ' + ac.state + ' sr ' + ac.sampleRate); setTimeout(() => r('timeout state ' + ac.state), 4000); });
+  });
+  await t('micWorklet', async () => {
+    if (!window.__mic) return 'no mic';
+    const ac = new AudioContext({ sampleRate: 48000 });
+    const code = `class P extends AudioWorkletProcessor { constructor(){super();this.n=0;this.max=0;} process(i){ const c=i[0]&&i[0][0]; if(c){ this.n+=c.length; for(const v of c) this.max=Math.max(this.max,Math.abs(v)); if(this.n>=24000){ this.port.postMessage([this.n,this.max]); this.n=-1e12; } } return true; } } registerProcessor('q', P);`;
+    await ac.audioWorklet.addModule(URL.createObjectURL(new Blob([code], { type: 'application/javascript' })));
+    const src = ac.createMediaStreamSource(window.__mic); const node = new AudioWorkletNode(ac, 'q'); src.connect(node); await ac.resume();
+    return await new Promise((r) => { node.port.onmessage = (e) => r('samples ' + e.data[0] + ' peak ' + e.data[1].toFixed(3)); setTimeout(() => r('timeout'), 4000); });
+  });
+  await t('opusEncode', async () => { if (typeof AudioEncoder === 'undefined') return 'no AudioEncoder'; return JSON.stringify(await AudioEncoder.isConfigSupported({ codec: 'opus', sampleRate: 48000, numberOfChannels: 1 })); });
+  await t('opusDecode', async () => JSON.stringify((await AudioDecoder.isConfigSupported({ codec: 'opus', sampleRate: 48000, numberOfChannels: 2 })).supported));
+  await t('vp8EncodeRealtime', async () => {
+    const c = document.getElementById('c'), x = c.getContext('2d'); let n = 0, bytes = 0, keys = 0;
+    const enc = new VideoEncoder({ output: (ch) => { n++; bytes += ch.byteLength; if (ch.type === 'key') keys++; }, error: (e) => { out.encErr = e.message; } });
+    enc.configure({ codec: 'vp8', width: 320, height: 240, bitrate: 300000, framerate: 30, latencyMode: 'realtime' });
+    const t0 = performance.now();
+    for (let i = 0; i < 60; i++) { x.fillStyle = `hsl(${i * 6},70%,50%)`; x.fillRect(0, 0, 320, 240); x.fillStyle = '#fff'; x.fillRect(i * 4, 100, 30, 30); const f = new VideoFrame(c, { timestamp: i * 33333 }); enc.encode(f, { keyFrame: i === 0 }); f.close(); }
+    await enc.flush();
+    return `frames ${n} keys ${keys} bytes ${bytes} ms ${Math.round(performance.now() - t0)}`;
+  });
+  await t('frameFromVideo', async () => {
+    const c = document.getElementById('c'); const s = c.captureStream(15); const v = document.getElementById('v'); v.srcObject = s; await v.play().catch(() => {});
+    const x = c.getContext('2d'); let i = 0; const iv = setInterval(() => { x.fillStyle = `hsl(${(i++) * 20},70%,50%)`; x.fillRect(0, 0, 320, 240); }, 50);
+    await new Promise((r) => setTimeout(r, 800)); clearInterval(iv);
+    const f = new VideoFrame(v, { timestamp: 0 }); const r = f.codedWidth + 'x' + f.codedHeight + ' ' + f.format; f.close();
+    return r + ' rVFC=' + (typeof v.requestVideoFrameCallback);
+  });
+  await t('trackProcessor', async () => typeof MediaStreamTrackProcessor + ' ' + typeof MediaStreamTrackGenerator + ' ' + typeof VideoTrackGenerator);
+  await t('transferableStreams', async () => { const rs = new ReadableStream(); const mc = new MessageChannel(); mc.port1.postMessage(rs, [rs]); return 'ok'; });
+  await t('encodedTransformCtors', async () => typeof RTCRtpScriptTransform + ' ' + typeof RTCEncodedVideoFrame);
+  window.__TAURI_INTERNALS__.invoke('plugin:webrtc|pc_get_stats', { id: 0 }).catch(() => {});
+  document.title = 'done';
+  window.__PROBE = out;
+  await wsReady; ws.send(JSON.stringify({ done: true }));
+})();
+</script></body></html>

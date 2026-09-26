@@ -82,6 +82,20 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'sta
         .map_err(DomError::from)
 }
 
+/// Media frame on the peer's channel:
+/// `[u32 LE tx][u8 2][u8 flags: bit0 keyframe][u8 codec][u8 0][u64 LE timestamp_us][payload]`.
+fn media_frame(f: EncodedFrame) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(16 + f.data.len());
+    buf.extend_from_slice(&f.tx.to_le_bytes());
+    buf.push(2);
+    buf.push(f.keyframe as u8);
+    buf.push(f.codec.wire_id());
+    buf.push(0);
+    buf.extend_from_slice(&f.timestamp_us.to_le_bytes());
+    buf.extend_from_slice(&f.data);
+    buf
+}
+
 /// Wire format for data channel messages on the peer's channel:
 /// `[u32 LE handle][u8 kind: 0 text, 1 binary][payload]`.
 fn frame(handle: DcHandle, payload: Payload) -> Vec<u8> {
@@ -116,6 +130,7 @@ async fn pc_create<R: Runtime>(
     let sink: EventSink = Arc::new(move |e: PeerEvent| {
         let body = match e {
             PeerEvent::DcMessage { handle, payload } => InvokeResponseBody::Raw(frame(handle, payload)),
+            PeerEvent::MediaFrame(f) => InvokeResponseBody::Raw(media_frame(f)),
             other => match serde_json::to_string(&other) {
                 Ok(s) => InvokeResponseBody::Json(s),
                 Err(err) => {
@@ -145,13 +160,13 @@ async fn pc_create_answer<R: Runtime>(webview: Webview<R>, state: State<'_, Webr
 }
 
 #[tauri::command]
-async fn pc_set_local<R: Runtime>(webview: Webview<R>, state: State<'_, WebrtcState>, id: u32, desc: SessionDescription) -> CmdResult<()> {
+async fn pc_set_local<R: Runtime>(webview: Webview<R>, state: State<'_, WebrtcState>, id: u32, desc: SessionDescription) -> CmdResult<Vec<TransceiverState>> {
     let p = state.peer(webview.label(), id)?;
     blocking(move || p.set_local_description(&desc)).await
 }
 
 #[tauri::command]
-async fn pc_set_remote<R: Runtime>(webview: Webview<R>, state: State<'_, WebrtcState>, id: u32, desc: SessionDescription) -> CmdResult<()> {
+async fn pc_set_remote<R: Runtime>(webview: Webview<R>, state: State<'_, WebrtcState>, id: u32, desc: SessionDescription) -> CmdResult<Vec<TransceiverState>> {
     let p = state.peer(webview.label(), id)?;
     blocking(move || p.set_remote_description(&desc)).await
 }
@@ -253,6 +268,45 @@ async fn dc_send<R: Runtime>(webview: Webview<R>, state: State<'_, WebrtcState>,
 }
 
 #[tauri::command]
+async fn pc_upsert_transceiver<R: Runtime>(
+    webview: Webview<R>,
+    state: State<'_, WebrtcState>,
+    id: u32,
+    spec: TransceiverSpec,
+) -> CmdResult<()> {
+    let p = state.peer(webview.label(), id)?;
+    blocking(move || p.upsert_transceiver(spec)).await
+}
+
+#[tauri::command]
+async fn pc_request_keyframe<R: Runtime>(webview: Webview<R>, state: State<'_, WebrtcState>, id: u32, tx: TxId) -> CmdResult<()> {
+    state.peer(webview.label(), id)?.request_keyframe(tx).map_err(DomError::from)
+}
+
+#[tauri::command]
+async fn pc_restart_ice<R: Runtime>(webview: Webview<R>, state: State<'_, WebrtcState>, id: u32) -> CmdResult<()> {
+    state.peer(webview.label(), id)?.restart_ice().map_err(DomError::from)
+}
+
+/// One encoded frame from a page encoder. Raw body: the frame. Headers:
+/// `x-pc`, `x-tx`, `x-codec` (wire id), `x-key` (0/1), `x-ts` (microseconds).
+#[tauri::command]
+async fn media_push<R: Runtime>(webview: Webview<R>, state: State<'_, WebrtcState>, request: Request<'_>) -> CmdResult<()> {
+    let id: u32 = header(&request, "x-pc")?;
+    let tx: TxId = header(&request, "x-tx")?;
+    let codec: u8 = header(&request, "x-codec")?;
+    let key: u8 = header(&request, "x-key")?;
+    let ts: u64 = header(&request, "x-ts")?;
+    let codec = CodecName::from_wire_id(codec).ok_or_else(|| dom("TypeError", "unknown codec"))?;
+    let InvokeBody::Raw(body) = request.body() else {
+        return Err(dom("TypeError", "media_push expects a raw body"));
+    };
+    let p = state.peer(webview.label(), id)?;
+    p.send_frame(EncodedFrame { tx, codec, keyframe: key == 1, timestamp_us: ts, data: body.clone().into() })
+        .map_err(DomError::from)
+}
+
+#[tauri::command]
 async fn dc_close<R: Runtime>(webview: Webview<R>, state: State<'_, WebrtcState>, id: u32, handle: DcHandle) -> CmdResult<()> {
     state.peer(webview.label(), id)?.dc_close(handle).map_err(DomError::from)
 }
@@ -342,6 +396,10 @@ impl Builder {
                 pc_add_ice,
                 pc_get_stats,
                 pc_close,
+                pc_upsert_transceiver,
+                pc_request_keyframe,
+                pc_restart_ice,
+                media_push,
                 dc_create,
                 dc_send,
                 dc_close,

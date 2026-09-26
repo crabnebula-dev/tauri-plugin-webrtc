@@ -148,6 +148,8 @@ async function roleMatrixCall(o) {
   out.usermedia = { heard, seen, streamIdFromMetadata: !!um.stream.id };
   out.audioSenders = [];
   try { (await call.peerConn.getStats()).forEach((r) => { if (r.type === 'outbound-rtp' && r.kind === 'audio') out.audioSenders.push({ mid: r.mid, framesSent: r.framesSent, packetsSent: r.packetsSent }); }); } catch {}
+  out.videoIn = [];
+  try { (await call.peerConn.getStats()).forEach((r) => { if (r.type === 'inbound-rtp' && r.kind === 'video') out.videoIn.push({ mid: r.mid, framesReceived: r.framesReceived, framesDecoded: r.framesDecoded, keyFramesDecoded: r.keyFramesDecoded, frameWidth: r.frameWidth, pliCount: r.pliCount }); }); } catch {}
   out.audioTransceivers = call.peerConn.getTransceivers().filter((t) => t.sender.track && t.sender.track.kind === 'audio').length;
   out.elapsedMs = Math.round(performance.now() - t0);
   out.audioOk = !!heard.peakHz && Math.abs(heard.peakHz - o.expectFreq) < 25 && heard.rmsMax > 0.1; // synthetic tracks get no capture processing

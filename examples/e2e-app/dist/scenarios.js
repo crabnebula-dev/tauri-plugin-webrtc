@@ -29,6 +29,20 @@ async function shimConformance() {
   pc.close();
   out.afterClose = [pc.signalingState, pc.connectionState, dc.readyState].join('/');
   try { pc.createDataChannel('y'); out.createAfterClose = 'ok'; } catch (e) { out.createAfterClose = e.name; }
+  // The exact shape matrix-js-sdk MatrixCall.createPeerConnection() passes.
+  try {
+    const m = new window.RTCPeerConnection({
+      iceTransportPolicy: undefined,
+      iceServers: [{ urls: ['turn:turn.example.org:3478?transport=udp', 'turns:turn.example.org:443?transport=tcp'], username: '1790000000:@u:example.org', credential: 'a/b+c=' }],
+      iceCandidatePoolSize: 0,
+      bundlePolicy: 'max-bundle',
+    });
+    m.createDataChannel('m');
+    const o = await m.createOffer();
+    await m.setLocalDescription(o);
+    out.matrixConfig = m.signalingState === 'have-local-offer' ? 'ok' : m.signalingState;
+    m.close();
+  } catch (e) { out.matrixConfig = e.name + ': ' + e.message; }
   return out;
 }
 

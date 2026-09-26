@@ -55,7 +55,7 @@ await page.evaluate((u) => connectHarness('chromium', u), url);
 
 // WebKitGTK side: the Tauri app, as Tchap would ship it.
 const app = spawn('xvfb-run', ['-a', appBin], {
-  env: { ...process.env, E2E_WS: url, RUST_LOG: process.env.RUST_LOG || 'warn' },
+  env: { ...process.env, E2E_WS: url, TCHAP_WEBRTC_E2E_WS: url, TCHAP_WEBRTC_E2E_SCENARIOS: path.join(root, 'examples/e2e-app/dist/scenarios.js'), RUST_LOG: process.env.RUST_LOG || 'warn' },
   stdio: ['ignore', 'inherit', 'pipe'],
 });
 app.stderr.on('data', (d) => {
@@ -80,7 +80,7 @@ try {
   const c = results.conformance;
   const conformanceOk = c.createAnswerInStable === 'InvalidStateError' && c.addTrack === 'NotSupportedError'
     && c.addIceNoRemote === 'InvalidStateError' && c.sendBeforeOpen === 'InvalidStateError'
-    && c.afterSetLocal === 'have-local-offer' && c.createAfterClose === 'InvalidStateError' && c.offerHasApplication && c.negotiationNeeded === true && c.badSdp === 'OperationError' && c.badSdpState === 'stable';
+    && c.afterSetLocal === 'have-local-offer' && c.createAfterClose === 'InvalidStateError' && c.offerHasApplication && c.negotiationNeeded === true && c.matrixConfig === 'ok' && c.badSdp === 'OperationError' && c.badSdpState === 'stable';
   results.summary = {
     shimInstalled: !!(hello.webkit && hello.webkit.shim),
     conformanceOk,

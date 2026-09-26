@@ -46,7 +46,7 @@ const run = (name, what, opts, ms = 60000) => new Promise((resolve) => {
 });
 
 // Chromium side.
-const args = mdns ? [] : ['--disable-features=WebRtcHideLocalIpsWithMdns'];
+const args = ['--autoplay-policy=no-user-gesture-required', ...(mdns ? [] : ['--disable-features=WebRtcHideLocalIpsWithMdns'])];
 const browser = await chromium.launch({ executablePath: exe, args });
 const page = await browser.newPage();
 page.on('console', (m) => { if (m.type() === 'error') console.log('[chromium]', m.text()); });
@@ -85,6 +85,13 @@ try {
   answer = run('webkit', 'mediaAnswer');
   results.mediaChromiumOffers = await run('chromium', 'mediaOffer');
   results.mediaChromiumOffersWebkitSide = await answer;
+  // Audio: WebKit sends 440 Hz, Chromium sends 660 Hz; each must hear the other.
+  answer = run('chromium', 'audio', { offer: false, freq: 660, expect: 440 });
+  results.audioWebkitOffers = await run('webkit', 'audio', { offer: true, freq: 440, expect: 660 });
+  results.audioWebkitOffersChromiumSide = await answer;
+  answer = run('webkit', 'audio', { offer: false, freq: 440, expect: 660 });
+  results.audioChromiumOffers = await run('chromium', 'audio', { offer: true, freq: 660, expect: 440 });
+  results.audioChromiumOffersWebkitSide = await answer;
   const c = results.conformance;
   const conformanceOk = c.createAnswerInStable === 'InvalidStateError' && c.addTrack === 'TypeError'
     && c.addIceNoRemote === 'InvalidStateError' && c.sendBeforeOpen === 'InvalidStateError'
@@ -96,6 +103,8 @@ try {
     chromiumOffers: results.chromiumOffers.ok && results.chromiumOffersWebkitSide.ok,
     mediaWebkitOffers: results.mediaWebkitOffers.ok && results.mediaWebkitOffersChromiumSide.ok,
     mediaChromiumOffers: results.mediaChromiumOffers.ok && results.mediaChromiumOffersWebkitSide.ok,
+    audioWebkitOffers: results.audioWebkitOffers.ok && results.audioWebkitOffersChromiumSide.ok,
+    audioChromiumOffers: results.audioChromiumOffers.ok && results.audioChromiumOffersWebkitSide.ok,
   };
   exitCode = Object.values(results.summary).every(Boolean) ? 0 : 1;
 } catch (e) {

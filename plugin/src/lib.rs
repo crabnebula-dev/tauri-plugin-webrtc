@@ -96,6 +96,19 @@ fn media_frame(f: EncodedFrame) -> Vec<u8> {
     buf
 }
 
+/// Decoded audio on the peer's channel:
+/// `[u32 LE tx][u8 3][u8 0][u8 0][u8 0][u64 0][i16 LE samples, 48 kHz mono]`.
+fn audio_frame(tx: TxId, samples: &[i16]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(16 + samples.len() * 2);
+    buf.extend_from_slice(&tx.to_le_bytes());
+    buf.extend_from_slice(&[3, 0, 0, 0]);
+    buf.extend_from_slice(&0u64.to_le_bytes());
+    for s in samples {
+        buf.extend_from_slice(&s.to_le_bytes());
+    }
+    buf
+}
+
 /// Wire format for data channel messages on the peer's channel:
 /// `[u32 LE handle][u8 kind: 0 text, 1 binary][payload]`.
 fn frame(handle: DcHandle, payload: Payload) -> Vec<u8> {
@@ -131,6 +144,7 @@ async fn pc_create<R: Runtime>(
         let body = match e {
             PeerEvent::DcMessage { handle, payload } => InvokeResponseBody::Raw(frame(handle, payload)),
             PeerEvent::MediaFrame(f) => InvokeResponseBody::Raw(media_frame(f)),
+            PeerEvent::AudioPcm { tx, samples } => InvokeResponseBody::Raw(audio_frame(tx, &samples)),
             other => match serde_json::to_string(&other) {
                 Ok(s) => InvokeResponseBody::Json(s),
                 Err(err) => {
@@ -306,6 +320,19 @@ async fn media_push<R: Runtime>(webview: Webview<R>, state: State<'_, WebrtcStat
         .map_err(DomError::from)
 }
 
+/// Captured PCM for an audio sender. Raw body: i16 LE, 48 kHz mono.
+/// Headers: `x-pc`, `x-tx`.
+#[tauri::command]
+async fn audio_push<R: Runtime>(webview: Webview<R>, state: State<'_, WebrtcState>, request: Request<'_>) -> CmdResult<()> {
+    let id: u32 = header(&request, "x-pc")?;
+    let tx: TxId = header(&request, "x-tx")?;
+    let InvokeBody::Raw(body) = request.body() else {
+        return Err(dom("TypeError", "audio_push expects a raw body"));
+    };
+    let samples: Vec<i16> = body.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+    state.peer(webview.label(), id)?.push_pcm(tx, samples).map_err(DomError::from)
+}
+
 #[tauri::command]
 async fn dc_close<R: Runtime>(webview: Webview<R>, state: State<'_, WebrtcState>, id: u32, handle: DcHandle) -> CmdResult<()> {
     state.peer(webview.label(), id)?.dc_close(handle).map_err(DomError::from)
@@ -400,6 +427,7 @@ impl Builder {
                 pc_request_keyframe,
                 pc_restart_ice,
                 media_push,
+                audio_push,
                 dc_create,
                 dc_send,
                 dc_close,

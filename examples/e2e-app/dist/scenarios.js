@@ -179,6 +179,7 @@ function connectHarness(name, url, log = console.log) {
       else if (m.what === 'answer') result = await roleAnswer(sig);
       else if (m.what === 'mediaOffer') result = await roleMediaOffer(sig);
       else if (m.what === 'mediaAnswer') result = await roleMediaAnswer(sig);
+      else if (m.what === 'audio') result = await roleAudio(sig, m.opts);
     } catch (err) {
       result = { ok: false, error: `${err && err.name}: ${err && err.message}` };
     }
@@ -304,4 +305,75 @@ async function roleMediaAnswer(sig) {
   src.stop(); pc.close();
   const { rendered, inbound } = measured;
   return { ok: !!trackInfo && trackInfo.streamId === remoteStreamId && removed && rendered && rendered !== '0x0' && inbound && inbound.framesDecoded > 10, ontrackStreamMatches: trackInfo && trackInfo.streamId === remoteStreamId, removed, inbound, rendered };
+}
+
+// ------------------------------------------------------------------ audio
+function toneTrack(freq) {
+  const ac = new AudioContext({ sampleRate: 48000 });
+  const osc = ac.createOscillator(); osc.frequency.value = freq;
+  const gain = ac.createGain(); gain.gain.value = 0.3;
+  const dest = ac.createMediaStreamDestination();
+  osc.connect(gain).connect(dest); osc.start(); ac.resume().catch(() => {});
+  return { stream: dest.stream, track: dest.stream.getAudioTracks()[0], stop: () => { osc.stop(); ac.close(); } };
+}
+
+async function analyse(stream, ms = 2500) {
+  // Chrome only feeds remote WebRTC audio into WebAudio while a media element plays it.
+  const el = new Audio(); el.muted = true; el.srcObject = stream; el.play().catch(() => {});
+  const ac = new AudioContext({ sampleRate: 48000 });
+  await ac.resume().catch(() => {});
+  const src = ac.createMediaStreamSource(stream);
+  const an = ac.createAnalyser(); an.fftSize = 8192; src.connect(an);
+  const bins = new Float32Array(an.frequencyBinCount); const td = new Float32Array(an.fftSize);
+  const peaks = []; let rmsMax = 0;
+  const end = performance.now() + ms;
+  while (performance.now() < end) {
+    await new Promise((r) => setTimeout(r, 200));
+    an.getFloatFrequencyData(bins); an.getFloatTimeDomainData(td);
+    let bi = 0; for (let i = 1; i < bins.length; i++) if (bins[i] > bins[bi]) bi = i;
+    const rms = Math.sqrt(td.reduce((a, v) => a + v * v, 0) / td.length);
+    rmsMax = Math.max(rmsMax, rms);
+    if (rms > 0.01) peaks.push(Math.round((bi * ac.sampleRate) / an.fftSize));
+  }
+  ac.close(); el.srcObject = null;
+  peaks.sort((a, b) => a - b);
+  return { peakHz: peaks.length ? peaks[Math.floor(peaks.length / 2)] : null, rmsMax: +rmsMax.toFixed(3), state: ac.state, samples: peaks.length };
+}
+
+async function roleAudio(sig, opts) {
+  const { offer, freq, expect } = opts;
+  const pc = new RTCPeerConnection();
+  const flush = wirePeer(pc, sig);
+  const src = toneTrack(freq);
+  let remote = null;
+  pc.ontrack = (e) => { remote = e.streams[0] || new MediaStream([e.track]); };
+  const finished = new Promise((res) => sig.on((m) => { if (m.kind === 'done') res(); }));
+  if (offer) {
+    pc.addTrack(src.track, src.stream);
+    const answered = new Promise((res) => sig.on(async (m) => { if (m.kind === 'sdp' && m.desc.type === 'answer') { await pc.setRemoteDescription(m.desc); await flush(); res(); } }));
+    await pc.setLocalDescription(await pc.createOffer());
+    sig.send({ kind: 'sdp', desc: pc.localDescription.toJSON ? pc.localDescription.toJSON() : pc.localDescription });
+    await answered;
+  } else {
+    await new Promise((res) => sig.on(async (m) => {
+      if (m.kind === 'sdp' && m.desc.type === 'offer') {
+        await pc.setRemoteDescription(m.desc);
+        pc.addTrack(src.track, src.stream);
+        await pc.setLocalDescription(await pc.createAnswer());
+        sig.send({ kind: 'sdp', desc: pc.localDescription.toJSON ? pc.localDescription.toJSON() : pc.localDescription });
+        await flush(); res();
+      }
+    }));
+  }
+  for (let k = 0; k < 50 && (!remote || pc.connectionState !== 'connected'); k++) await new Promise((r) => setTimeout(r, 100));
+  await new Promise((r) => setTimeout(r, 1500));
+  const heard = remote ? await analyse(remote) : null;
+  let stats = {};
+  (await pc.getStats()).forEach((s) => { if ((s.type === 'inbound-rtp' || s.type === 'engine-audio-in') && (s.kind === 'audio' || s.type === 'engine-audio-in')) Object.assign(stats, s); });
+  plog('audio inbound stats', JSON.stringify({ audioLevel: stats.audioLevel, totalAudioEnergy: stats.totalAudioEnergy, concealedSamples: stats.concealedSamples, totalSamplesReceived: stats.totalSamplesReceived, packetsLost: stats.packetsLost, jitter: stats.jitter, decoder: stats.decoderImplementation }));
+  if (offer) sig.send({ kind: 'done' }); else await finished;
+  if (offer) await new Promise((r) => setTimeout(r, 300));
+  src.stop(); pc.close();
+  const ok = !!heard && heard.peakHz !== null && Math.abs(heard.peakHz - expect) < 25 && heard.rmsMax > 0.05;
+  return { ok, heard, expect, connectionState: pc.connectionState, stats: { packetsReceived: stats.packetsReceived, concealedPackets: stats.concealedPackets, underruns: stats.underruns, jitterBufferFrames: stats.jitterBufferFrames, jitterTargetFrames: stats.jitterTargetFrames } };
 }

@@ -383,24 +383,131 @@
     stats() { return { framesReceived: this.framesReceived, framesDecoded: this.framesDecoded, keyFramesDecoded: this.keyFramesDecoded, bytesReceived: this.bytes, frameWidth: this.canvas.width, frameHeight: this.canvas.height }; }
   }
 
-  // Audio pipelines (engine-side Opus, AEC and jitter buffering) arrive with
-  // fidelity level L2. Until then the receiver track is a live silent track so
-  // `track` events and stream plumbing behave, and audio senders are inert.
+  // Audio: the page does device I/O through AudioWorklets; the engine runs
+  // echo cancellation, noise suppression, AGC, Opus and the playout clock.
+  const WORKLET = `
+    class Capture extends AudioWorkletProcessor {
+      constructor() { super(); this.buf = new Int16Array(960); this.n = 0; }
+      process(inputs) {
+        const ch = inputs[0];
+        if (ch && ch.length) {
+          const a = ch[0]; const b = ch[1];
+          for (let i = 0; i < a.length; i++) {
+            let v = b ? (a[i] + b[i]) * 0.5 : a[i];
+            v = v < -1 ? -1 : v > 1 ? 1 : v;
+            this.buf[this.n++] = v * 32767;
+            if (this.n === 960) { this.port.postMessage(this.buf.buffer, [this.buf.buffer]); this.buf = new Int16Array(960); this.n = 0; }
+          }
+        }
+        return true;
+      }
+    }
+    class Playout extends AudioWorkletProcessor {
+      constructor() {
+        super();
+        this.ring = new Float32Array(48000); this.r = 0; this.w = 0; this.size = 0; this.primed = false;
+        this.underruns = 0; this.skipped = 0;
+        this.port.onmessage = (e) => {
+          const s = new Int16Array(e.data);
+          for (let i = 0; i < s.length; i++) {
+            if (this.size === this.ring.length) { this.r = (this.r + 1) % this.ring.length; this.size--; }
+            this.ring[this.w] = s[i] / 32768; this.w = (this.w + 1) % this.ring.length; this.size++;
+          }
+          // Drift and burst control: keep latency near 60 ms.
+          if (this.size > 7200) { const d = this.size - 2880; this.r = (this.r + d) % this.ring.length; this.size -= d; this.skipped += d; }
+        };
+      }
+      process(_, outputs) {
+        const out = outputs[0][0];
+        if (!this.primed && this.size >= 2880) this.primed = true;
+        for (let i = 0; i < out.length; i++) {
+          if (this.primed && this.size > 0) { out[i] = this.ring[this.r]; this.r = (this.r + 1) % this.ring.length; this.size--; }
+          else { out[i] = 0; }
+        }
+        if (this.primed && this.size === 0) { this.primed = false; this.underruns++; }
+        for (let c = 1; c < outputs[0].length; c++) outputs[0][c].set(out);
+        return true;
+      }
+    }
+    registerProcessor('tauri-webrtc-capture', Capture);
+    registerProcessor('tauri-webrtc-playout', Playout);
+  `;
+  let workletReady = null;
+  function audioWorklets() {
+    if (!workletReady) {
+      const c = ctx();
+      workletReady = c.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' })))
+        .then(() => { c.resume().catch(() => {}); return c; });
+    }
+    return workletReady;
+  }
+
+  class AudioSendPipe {
+    constructor(sender) {
+      this.sender = sender; this.track = null; this.src = null; this.node = null; this.stopped = false;
+      this.q = []; this.busy = false; this.sent = 0; this.bytes = 0; this.silentFrames = 0;
+    }
+    setTrack(track) {
+      if (track === this.track) return;
+      this.track = track;
+      if (this.src) { try { this.src.disconnect(); } catch {} this.src = null; }
+      if (!track) return;
+      audioWorklets().then((c) => {
+        if (this.stopped || this.track !== track) return;
+        if (!this.node) {
+          this.node = new AudioWorkletNode(c, 'tauri-webrtc-capture', { numberOfInputs: 1, numberOfOutputs: 0, channelCount: 2, channelCountMode: 'explicit' });
+          this.node.port.onmessage = (e) => this._frame(e.data);
+        }
+        this.src = c.createMediaStreamSource(new MediaStream([track]));
+        this.src.connect(this.node);
+      }).catch((e) => console.warn('[tauri-webrtc] audio capture', e));
+    }
+    _frame(buf) {
+      if (this.stopped || !this.track) return;
+      // Disabled tracks send silence, like browsers.
+      if (!this.track.enabled || this.track.readyState !== 'live') { new Int16Array(buf).fill(0); this.silentFrames++; }
+      if (this.q.length > 10) this.q.splice(0, this.q.length - 5);
+      this.q.push(buf); this._pump();
+    }
+    async _pump() {
+      if (this.busy) return; this.busy = true;
+      try {
+        const id = await this.sender._tx._pc._id;
+        while (this.q.length) {
+          const bufs = this.q.splice(0, this.q.length);
+          const body = new Uint8Array(bufs.reduce((n, b) => n + b.byteLength, 0));
+          let o = 0; for (const b of bufs) { body.set(new Uint8Array(b), o); o += b.byteLength; }
+          await invoke('audio_push', body, { headers: { 'x-pc': String(id), 'x-tx': String(this.sender._tx._id) } });
+          this.sent += bufs.length; this.bytes += body.byteLength;
+        }
+      } catch (e) { /* closed */ } finally { this.busy = false; }
+    }
+    stop() { this.stopped = true; if (this.src) try { this.src.disconnect(); } catch {} if (this.node) { this.node.port.onmessage = null; } }
+    stats() { return { framesSent: this.sent, silentFrames: this.silentFrames }; }
+  }
+
   class AudioRecvPipe {
     constructor(tx) {
-      this.tx = tx; this.framesReceived = 0; this.bytes = 0;
-      try { this.dest = ctx().createMediaStreamDestination(); this.track = this.dest.stream.getAudioTracks()[0]; }
-      catch (e) { this.track = null; }
+      this.tx = tx; this.framesReceived = 0; this.samples = 0; this.pending = [];
+      try {
+        const c = ctx();
+        this.dest = c.createMediaStreamDestination();
+        this.track = this.dest.stream.getAudioTracks()[0];
+        audioWorklets().then((c2) => {
+          this.node = new AudioWorkletNode(c2, 'tauri-webrtc-playout', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] });
+          this.node.connect(this.dest);
+          for (const p of this.pending.splice(0)) this.node.port.postMessage(p, [p]);
+        }).catch((e) => console.warn('[tauri-webrtc] audio playout', e));
+      } catch (e) { this.track = null; }
     }
-    frame(codec, key, ts, data) { this.framesReceived++; this.bytes += data.byteLength; }
-    stop() { if (this.track) this.track.stop(); }
-    stats() { return { packetsReceived: this.framesReceived, bytesReceived: this.bytes }; }
-  }
-  class AudioSendPipe {
-    constructor(sender) { this.sender = sender; this.track = null; }
-    setTrack(t) { this.track = t; }
-    stop() {}
-    stats() { return {}; }
+    pcm(bytes) {
+      this.framesReceived++; this.samples += bytes.byteLength / 2;
+      const buf = bytes.slice().buffer;
+      if (this.node) this.node.port.postMessage(buf, [buf]); else if (this.pending.length < 50) this.pending.push(buf);
+    }
+    frame() {}
+    stop() { if (this.node) try { this.node.disconnect(); } catch {} if (this.track) this.track.stop(); }
+    stats() { return { packetsReceived: this.framesReceived, totalSamplesReceived: this.samples }; }
   }
 
   const AUDIO_CAPS = { codecs: [{ mimeType: 'audio/opus', clockRate: 48000, channels: 2, sdpFmtpLine: 'minptime=10;useinbandfec=1' }], headerExtensions: [] };
@@ -893,6 +1000,11 @@
         const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
         const handle = dv.getUint32(0, true);
         const kind = bytes[4];
+        if (kind === 3) { // decoded audio for a receiver
+          const t = this._txs.get(handle);
+          if (t && !t._stopping && t.receiver._pipe.pcm) t.receiver._pipe.pcm(bytes.subarray(16));
+          return;
+        }
         if (kind === 2) { // media frame
           const t = this._txs.get(handle);
           if (t && !t._stopping) t.receiver._pipe.frame(bytes[6], (bytes[5] & 1) === 1, Number(dv.getBigUint64(8, true)), bytes.subarray(16));
@@ -1001,5 +1113,5 @@
     Object.defineProperty(window, name, { value, writable: true, configurable: true, enumerable: false });
   }
   Object.defineProperty(window, 'webkitRTCPeerConnection', { value: RTCPeerConnection, writable: true, configurable: true });
-  Object.defineProperty(RTCPeerConnection, '__tauriShim', { value: { level: 'L2-video', engine: info.engine } });
+  Object.defineProperty(RTCPeerConnection, '__tauriShim', { value: { level: 'L2', engine: info.engine } });
 })();

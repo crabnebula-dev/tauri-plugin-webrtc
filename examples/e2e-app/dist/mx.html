@@ -1,0 +1,9 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>matrix e2e</title></head>
+<body><pre id="log">starting</pre>
+<script src="mx/matrix.js"></script>
+<script src="mx.js"></script>
+<script>
+  const log = (s) => { document.getElementById('log').textContent += '\n' + s; };
+  mxHarness(window.__E2E_NAME__ || 'webkit', window.__E2E_WS__, log);
+</script></body></html>

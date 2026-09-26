@@ -55,7 +55,9 @@ await page.addScriptTag({ content: scenarios });
 await page.evaluate((u) => connectHarness('chromium', u), url);
 
 // WebKitGTK side: the Tauri app, as Tchap would ship it.
+const killGroup = (p) => { try { process.kill(-p.pid, 'SIGTERM'); } catch { p.kill('SIGTERM'); } };
 const app = spawn('xvfb-run', ['-a', appBin], {
+  detached: true, // own process group: xvfb-run, Xvfb and the app die together
   env: { ...process.env, E2E_WS: url, TCHAP_WEBRTC_E2E_WS: url, TCHAP_WEBRTC_E2E_SCENARIOS: path.join(root, 'examples/e2e-app/dist/scenarios.js'), RUST_LOG: process.env.RUST_LOG || 'warn' },
   stdio: ['ignore', 'inherit', 'pipe'],
 });
@@ -112,7 +114,7 @@ try {
 } finally {
   console.log(JSON.stringify({ mdns, results }, null, 2));
   if (process.env.RESULT_FILE) (await import('node:fs')).writeFileSync(process.env.RESULT_FILE, JSON.stringify({ mdns, results }, null, 2));
-  app.kill('SIGTERM');
+  killGroup(app);
   await browser.close();
   wss.close();
   setTimeout(() => process.exit(exitCode), 500);

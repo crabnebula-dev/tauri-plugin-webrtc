@@ -10,6 +10,7 @@ const COMMANDS: &[&str] = &[
     "pc_upsert_transceiver",
     "pc_request_keyframe",
     "pc_restart_ice",
+    "pc_set_transform",
     "media_push",
     "audio_push",
     "dc_create",

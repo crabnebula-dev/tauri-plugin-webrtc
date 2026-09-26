@@ -6,7 +6,18 @@
 (() => {
   'use strict';
   const info = window.__TAURI_WEBRTC__ || {};
-  const T = window.__TAURI_INTERNALS__;
+  // Same-origin iframes (Element Call is embedded as a widget) have no Tauri
+  // internals of their own; they use the nearest same-origin ancestor's IPC.
+  // Cross-origin frames throw on access and get no shim.
+  const T = (() => {
+    if (window.__TAURI_INTERNALS__) return window.__TAURI_INTERNALS__;
+    try {
+      for (let w = window; w !== w.parent;) { w = w.parent; if (w.__TAURI_INTERNALS__) return w.__TAURI_INTERNALS__; }
+    } catch { /* cross-origin ancestor */ }
+    return null;
+  })();
+  // Values from the parent realm fail instanceof checks against ours.
+  const isArrayBuffer = (v) => Object.prototype.toString.call(v) === '[object ArrayBuffer]';
   if (!T || !info.available) return;
   if (typeof window.RTCPeerConnection === 'function' && !info.force) return;
 
@@ -123,7 +134,7 @@
       if (this.readyState !== 'open') throw new DOMException('RTCDataChannel is not open', 'InvalidStateError');
       let kind; let bytes;
       if (typeof data === 'string') { kind = 0; bytes = enc.encode(data); }
-      else if (data instanceof ArrayBuffer) { kind = 1; bytes = new Uint8Array(data.slice(0)); }
+      else if (isArrayBuffer(data)) { kind = 1; bytes = new Uint8Array(data.slice(0)); }
       else if (ArrayBuffer.isView(data)) { kind = 1; bytes = new Uint8Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)); }
       else if (data instanceof Blob) {
         // Keep order: reserve a slot now, fill it when the Blob is read.
@@ -241,7 +252,7 @@
 
   // Sequential IPC for one sender: frames must reach the engine in order.
   class FramePusher {
-    constructor(pc, txId) { this.pc = pc; this.txId = txId; this.q = []; this.busy = false; this.sent = 0; this.bytes = 0; this.dropped = 0; }
+    constructor(pc, txId, extra) { this.pc = pc; this.txId = txId; this.extra = extra || {}; this.q = []; this.busy = false; this.sent = 0; this.bytes = 0; this.dropped = 0; }
     push(frame) {
       if (this.q.length > 8) { // bounded latency: drop the backlog, ask for a keyframe
         this.dropped += this.q.length; this.q.length = 0; this.onBacklog && this.onBacklog();
@@ -256,7 +267,7 @@
         while (this.q.length) {
           const f = this.q.shift();
           const t0 = performance.now();
-          await invoke('media_push', f.data, { headers: { 'x-pc': String(id), 'x-tx': String(this.txId), 'x-codec': String(f.codec), 'x-key': f.key ? '1' : '0', 'x-ts': String(f.ts) } });
+          await invoke('media_push', f.data, { headers: { ...this.extra, 'x-pc': String(id), 'x-tx': String(this.txId), 'x-codec': String(f.codec), 'x-key': f.key ? '1' : '0', 'x-ts': String(f.ts) } });
           this.ipcMs = (this.ipcMs || 0) + (performance.now() - t0);
           this.sent++; this.bytes += f.data.byteLength;
         }
@@ -276,6 +287,12 @@
     setTrack(track) {
       if (track === this.track) return;
       this.track = track; this.forceKey = true;
+      // Screen content: favour resolution over frame rate, like browsers do.
+      let settings = {};
+      try { settings = (track && track.getSettings && track.getSettings()) || {}; } catch {}
+      this.screen = !!track && (!!settings.displaySurface || track.contentHint === 'detail' || track.contentHint === 'text');
+      this.maxW = this.screen ? 1920 : MAX_W; this.maxH = this.screen ? 1080 : MAX_H; this.fps = this.screen ? 15 : MAX_FPS;
+      if (this.screen && this.bitrate < 1_500_000) this.bitrate = 1_500_000;
       if (!track) { if (this.video) this.video.srcObject = null; return; }
       if (!this.video) {
         this.video = document.createElement('video');
@@ -289,22 +306,25 @@
     _schedule() {
       if (this.stopped || !this.video) return;
       if (this.video.requestVideoFrameCallback) this.video.requestVideoFrameCallback(() => this._tick());
-      else setTimeout(() => this._tick(), 1000 / MAX_FPS);
+      else setTimeout(() => this._tick(), 1000 / (this.fps || MAX_FPS));
     }
     _configure(w, h) {
-      const s = Math.min(1, MAX_W / w, MAX_H / h) / this.scale;
+      // Pixel budget from the bitrate: about 0.08 bits per pixel per frame for VP8.
+      const budget = Math.max(160 * 120, this.bitrate / ((this.fps || MAX_FPS) * 0.08));
+      const bw = Math.min(1, Math.sqrt(budget / (w * h)));
+      const s = Math.min(1, (this.maxW || MAX_W) / w, (this.maxH || MAX_H) / h, bw) / this.scale;
       this.w = Math.max(2, Math.round((w * s) / 2) * 2); this.h = Math.max(2, Math.round((h * s) / 2) * 2);
       if (this.encoder && this.encoder.state !== 'closed') this.encoder.close();
       this.encoder = new VideoEncoder({
         output: (chunk) => {
           const data = new Uint8Array(chunk.byteLength); chunk.copyTo(data);
           const key = chunk.type === 'key'; this.framesEncoded++; if (key) this.keyFramesEncoded++;
-          this.pusher.push({ data, key, ts: chunk.timestamp, codec: CODEC.vp8 });
+          this.sender._out({ data, key, ts: chunk.timestamp, codec: CODEC.vp8, video: true, width: this.w, height: this.h });
         },
         error: (e) => { console.warn('[tauri-webrtc] video encoder', e); this.encoder = null; },
       });
       const bitrate = Math.max(50_000, Math.min(this.bitrate, this.maxBitrate || Infinity));
-      this.encoder.configure({ codec: 'vp8', width: this.w, height: this.h, bitrate, framerate: MAX_FPS, latencyMode: 'realtime' });
+      this.encoder.configure({ codec: 'vp8', width: this.w, height: this.h, bitrate, framerate: this.fps || MAX_FPS, latencyMode: 'realtime' });
       this.srcW = w; this.srcH = h; this.forceKey = true;
     }
     _tick() {
@@ -312,7 +332,7 @@
       const v = this.video; const t = this.track;
       try {
         const now = performance.now();
-        if (t && t.readyState === 'live' && this.active && v.videoWidth && now - this.lastFrameAt >= 1000 / MAX_FPS - 2) {
+        if (t && t.readyState === 'live' && this.active && v.videoWidth && now - this.lastFrameAt >= 1000 / (this.fps || MAX_FPS) - 2) {
           if (!this.encoder || v.videoWidth !== this.srcW || v.videoHeight !== this.srcH) this._configure(v.videoWidth, v.videoHeight);
           if (this.encoder && this.encoder.encodeQueueSize < 3) {
             this.lastFrameAt = now;
@@ -335,13 +355,18 @@
       } catch (e) { console.warn('[tauri-webrtc] video send', e); }
       this._schedule();
     }
+    // Follow the engine's bandwidth estimate. A WebCodecs reconfigure forces a
+    // keyframe, so only react to real changes and at most every two seconds.
     setBitrate(bps) {
-      const b = Math.round(bps * 0.9);
-      if (Math.abs(b - this.bitrate) / this.bitrate < 0.2) return;
-      this.bitrate = b; if (this.encoder) this._configure(this.srcW, this.srcH);
+      const b = Math.max(60_000, Math.round(bps));
+      const now = performance.now();
+      if (Math.abs(b - this.bitrate) / this.bitrate < 0.2 || now - (this._lastRate || 0) < 2000) return;
+      this._lastRate = now; this.bitrate = b;
+      // Resolution follows the bitrate (see _configure) so low-bandwidth calls stay smooth.
+      if (this.encoder) this._configure(this.srcW, this.srcH);
     }
     stop() { this.stopped = true; if (this.encoder && this.encoder.state !== 'closed') this.encoder.close(); if (this.video) { this.video.srcObject = null; this.video.remove(); } }
-    stats() { return { framesEncoded: this.framesEncoded, keyFramesEncoded: this.keyFramesEncoded, framesSent: this.pusher.sent, bytesSent: this.pusher.bytes, frameWidth: this.w, frameHeight: this.h, framesDropped: this.pusher.dropped, ipcMsPerFrame: this.pusher.sent ? +(this.pusher.ipcMs / this.pusher.sent).toFixed(2) : null }; }
+    stats() { return { framesEncoded: this.framesEncoded, keyFramesEncoded: this.keyFramesEncoded, framesSent: this.pusher.sent, bytesSent: this.pusher.bytes, frameWidth: this.w, frameHeight: this.h, targetBitrate: this.bitrate, framesDropped: this.pusher.dropped, ipcMsPerFrame: this.pusher.sent ? +(this.pusher.ipcMs / this.pusher.sent).toFixed(2) : null }; }
   }
 
   class VideoRecvPipe {
@@ -373,6 +398,11 @@
     }
     frame(codec, key, ts, data) {
       this.framesReceived++; this.bytes += data.byteLength;
+      const t = this.tx.receiver && this.tx.receiver._transform;
+      if (t) { t._process({ video: true, key, ts, codec, ssrc: this.tx.receiver._ssrc, pt: 96 }, data); return; }
+      this._decode(codec, key, ts, data);
+    }
+    _decode(codec, key, ts, data) {
       if (codec !== CODEC.vp8) return;
       if (this.needKey && !key) { this._askKey(); return; }
       this.needKey = false; if (key) this.keyFramesDecoded++;
@@ -505,10 +535,152 @@
       const buf = bytes.slice().buffer;
       if (this.node) this.node.port.postMessage(buf, [buf]); else if (this.pending.length < 50) this.pending.push(buf);
     }
-    frame() {}
+    // Encoded Opus arrives here only in transform mode; it goes back to the
+    // engine for decoding once the page's transform is done with it.
+    frame(codec, key, ts, data) {
+      const t = this.tx.receiver && this.tx.receiver._transform;
+      if (t) t._process({ video: false, key: true, ts, codec, ssrc: this.tx.receiver._ssrc, pt: 111 }, data);
+      else this._decode(codec, key, ts, data);
+    }
+    _decode(codec, key, ts, data) {
+      this.back = this.back || new FramePusher(this.tx._pc, this.tx._id, { 'x-dir': 'recv' });
+      this.back.push({ data: data.slice(), key: true, ts, codec });
+    }
     stop() { if (this.node) try { this.node.disconnect(); } catch {} if (this.track) this.track.stop(); }
     stats() { return { packetsReceived: this.framesReceived, totalSamplesReceived: this.samples }; }
   }
+
+  // ================================================ encoded transforms
+  // RTCRtpScriptTransform (the WebKit/Firefox shape of insertable streams),
+  // used by LiveKit E2EE. The page's worker receives an `rtctransform` event
+  // with readable/writable streams of encoded frames. WebKitGTK workers have
+  // no WebRTC globals, so every Worker is started through a small wrapper that
+  // loads the polyfill below first. Frames cross to the worker on a
+  // MessagePort, tagged so the main thread can match them on the way back.
+  const WORKER_POLYFILL = `(() => {
+    if (self.RTCTransformEvent) return;
+    const base = self.__tauriWorkerUrl;
+    if (base) {
+      // The worker runs from a blob: wrapper; keep relative URLs resolving
+      // against the real script, as they would without the wrapper.
+      const real = new URL(base);
+      const loc = { href: real.href, origin: real.origin, protocol: real.protocol, host: real.host, hostname: real.hostname,
+        port: real.port, pathname: real.pathname, search: real.search, hash: real.hash, toString() { return real.href; } };
+      try { Object.defineProperty(self, 'location', { get: () => loc, configurable: true }); } catch {}
+      const rel = (u) => (typeof u === 'string' ? new URL(u, real).href : u);
+      const f = self.fetch; if (f) self.fetch = (u, o) => f.call(self, u instanceof Request ? u : rel(String(u)), o);
+      const is = self.importScripts; if (is) self.importScripts = (...u) => is.apply(self, u.map((x) => rel(String(x))));
+      if (self.XMLHttpRequest) { const o = XMLHttpRequest.prototype.open; XMLHttpRequest.prototype.open = function (m, u, ...r) { return o.call(this, m, rel(String(u)), ...r); }; }
+    }
+    class RTCEncodedVideoFrame {
+      constructor(d) { this.type = d.type; this.timestamp = d.timestamp; this.data = d.data; this._m = d.metadata; }
+      getMetadata() { return { ...this._m }; }
+    }
+    class RTCEncodedAudioFrame {
+      constructor(d) { this.timestamp = d.timestamp; this.data = d.data; this._m = d.metadata; }
+      getMetadata() { return { ...this._m }; }
+    }
+    class RTCRtpScriptTransformer extends EventTarget {
+      constructor(port, options) {
+        super(); this.options = options; this._port = port;
+        const tags = new WeakMap();
+        this.readable = new ReadableStream({
+          start(c) {
+            port.onmessage = (e) => {
+              const d = e.data;
+              if (d.kf) return;
+              const f = d.video ? new RTCEncodedVideoFrame(d) : new RTCEncodedAudioFrame(d);
+              tags.set(f, d.tag); c.enqueue(f);
+            };
+          },
+        });
+        this.writable = new WritableStream({
+          write(f) {
+            const tag = tags.get(f);
+            if (tag === undefined) return; // frames must come from our readable
+            const data = f.data instanceof ArrayBuffer ? f.data : new Uint8Array(f.data).slice().buffer;
+            port.postMessage({ tag, data }, [data]);
+          },
+        });
+      }
+      generateKeyFrame() { this._port.postMessage({ kf: 'generate' }); return Promise.resolve(); }
+      sendKeyFrameRequest() { this._port.postMessage({ kf: 'request' }); return Promise.resolve(); }
+    }
+    class RTCTransformEvent extends Event {
+      constructor(type, init) { super(type, init); this.transformer = init && init.transformer; }
+    }
+    let handler = null;
+    Object.defineProperty(self, 'onrtctransform', {
+      configurable: true,
+      get: () => handler,
+      set: (v) => { if (handler) self.removeEventListener('rtctransform', handler); handler = typeof v === 'function' ? v : null; if (handler) self.addEventListener('rtctransform', handler); },
+    });
+    Object.assign(self, { RTCTransformEvent, RTCEncodedVideoFrame, RTCEncodedAudioFrame, RTCRtpScriptTransformer });
+    self.addEventListener('message', (e) => {
+      const d = e.data;
+      if (!d || d.__tauriRtcTransform !== 1) return;
+      e.stopImmediatePropagation();
+      const transformer = new RTCRtpScriptTransformer(d.port, d.options);
+      self.dispatchEvent(new RTCTransformEvent('rtctransform', { transformer }));
+    });
+  })();`;
+  const NativeWorker = window.Worker;
+  const TauriWorker = NativeWorker && info.wrapWorkers !== false ? class Worker extends NativeWorker {
+    constructor(url, options) {
+      let wrapped = null;
+      try {
+        const real = new URL(String(url), document.baseURI).href;
+        if (!real.startsWith('blob:') && !real.startsWith('data:')) {
+          // Imports evaluate in order, so the polyfill (with the real URL baked
+          // in) runs before the worker script defines its handlers.
+          const poly = URL.createObjectURL(new Blob([`self.__tauriWorkerUrl = ${JSON.stringify(real)};\n${WORKER_POLYFILL}`], { type: 'text/javascript' }));
+          const src = options && options.type === 'module'
+            ? `import ${JSON.stringify(poly)};\nimport ${JSON.stringify(real)};\n`
+            : `importScripts(${JSON.stringify(poly)});\nimportScripts(${JSON.stringify(real)});\n`;
+          wrapped = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+        }
+      } catch { wrapped = null; }
+      if (wrapped) {
+        try { super(wrapped, options); return; } catch (e) { console.warn('[tauri-webrtc] worker wrapper refused, transforms unavailable in it', e); }
+      }
+      super(url, options);
+    }
+  } : null;
+
+  let transformSsrc = 0x1000;
+  class RTCRtpScriptTransform {
+    constructor(worker, options, transfer) {
+      if (!worker || typeof worker.postMessage !== 'function') throw new TypeError('RTCRtpScriptTransform needs a Worker');
+      const ch = new MessageChannel();
+      this._port = ch.port1; this._pending = new Map(); this._seq = 0; this._sink = null; this._owner = null;
+      this._port.onmessage = (e) => {
+        const m = e.data;
+        if (m.kf) { if (this._owner && this._owner._onTransformKeyFrame) this._owner._onTransformKeyFrame(m.kf); return; }
+        const meta = this._pending.get(m.tag);
+        if (!meta) return;
+        this._pending.delete(m.tag);
+        if (this._sink) this._sink(meta, new Uint8Array(m.data));
+      };
+      worker.postMessage({ __tauriRtcTransform: 1, port: ch.port2, options }, [ch.port2, ...(transfer || [])]);
+    }
+    // meta: { video, key, ts (µs), codec, ssrc, pt }
+    _process(meta, bytes) {
+      const tag = ++this._seq;
+      this._pending.set(tag, meta);
+      if (this._pending.size > 600) this._pending.delete(this._pending.keys().next().value); // frames the transform dropped
+      const data = bytes.slice().buffer;
+      const clock = meta.video ? 90 : 48;
+      const rtpTimestamp = Math.floor((meta.ts * clock) / 1000) % 0x100000000;
+      const metadata = {
+        synchronizationSource: meta.ssrc, payloadType: meta.pt, contributingSources: [], rtpTimestamp,
+        mimeType: meta.video ? 'video/VP8' : 'audio/opus',
+      };
+      if (meta.video) Object.assign(metadata, { frameId: tag, dependencies: [], width: meta.width || 0, height: meta.height || 0, spatialIndex: 0, temporalIndex: 0 });
+      this._port.postMessage({ tag, video: meta.video, type: meta.video ? (meta.key ? 'key' : 'delta') : undefined, timestamp: rtpTimestamp, data, metadata }, [data]);
+    }
+    _detach() { this._sink = null; this._owner = null; }
+  }
+  const nextSsrc = () => (transformSsrc = (transformSsrc * 1103515245 + 12345) >>> 0) || 1;
 
   const AUDIO_CAPS = { codecs: [{ mimeType: 'audio/opus', clockRate: 48000, channels: 2, sdpFmtpLine: 'minptime=10;useinbandfec=1' }], headerExtensions: [] };
   const VIDEO_CAPS = { codecs: [{ mimeType: 'video/VP8', clockRate: 90000 }, { mimeType: 'video/rtx', clockRate: 90000 }], headerExtensions: [] };
@@ -531,9 +703,33 @@
     }
     _setTrack(track) {
       this.track = track || null; if (track) this._everSent = true;
-      if (!this._pipe && track) this._pipe = this._tx.kind === 'video' ? new VideoSendPipe(this) : new AudioSendPipe(this);
+      if (!this._pipe && track) {
+        this._pipe = this._tx.kind === 'video' ? new VideoSendPipe(this) : new AudioSendPipe(this);
+        if (this._tx.kind === 'video') this.setParameters(this._params).catch(() => {}); // sendEncodings from addTransceiver
+      }
       if (this._pipe) this._pipe.setTrack(this.track);
     }
+    get transform() { return this._transform || null; }
+    set transform(t) {
+      if (t != null && !(t instanceof RTCRtpScriptTransform)) throw new TypeError('transform must be an RTCRtpScriptTransform');
+      if (t && t._owner && t._owner !== this) throw new DOMException('transform is already in use', 'InvalidStateError');
+      if (this._transform && this._transform !== t) this._transform._detach();
+      this._transform = t || null; this._ssrc = this._ssrc || nextSsrc();
+      if (t) { t._owner = this; t._sink = (meta, data) => this._send(meta, data); }
+      if (this._tx.kind === 'audio') this._tx._syncTransform();
+    }
+    // An encoded frame from our video encoder or the engine's Opus encoder.
+    _out(f) {
+      const t = this._transform;
+      if (t) t._process({ video: f.video, key: f.key, ts: f.ts, codec: f.codec, ssrc: this._ssrc, pt: f.video ? 96 : 111, width: f.width, height: f.height }, f.data);
+      else this._send(f, f.data);
+    }
+    _send(meta, data) {
+      if (this._tx.kind === 'video') { if (this._pipe) this._pipe.pusher.push({ data, key: meta.key, ts: meta.ts, codec: meta.codec }); return; }
+      this._encPusher = this._encPusher || new FramePusher(this._tx._pc, this._tx._id);
+      this._encPusher.push({ data, key: true, ts: meta.ts, codec: meta.codec });
+    }
+    _onTransformKeyFrame() { if (this._pipe && this._tx.kind === 'video') this._pipe.forceKey = true; }
     async replaceTrack(track) {
       if (this._tx._pc._closed) throw new DOMException('RTCPeerConnection is closed', 'InvalidStateError');
       if (track && track.kind !== this._tx.kind) throw new TypeError('track kind does not match the sender');
@@ -544,7 +740,9 @@
     async setParameters(p) {
       if (!p || !Array.isArray(p.encodings)) throw new TypeError('encodings are required');
       this._params.encodings = p.encodings.map((e) => ({ ...e }));
-      const e0 = p.encodings[0] || {};
+      // We send one layer. With simulcast encodings, it is the best active one.
+      const act = p.encodings.filter((e) => e.active !== false);
+      const e0 = (act.length ? act : p.encodings).reduce((best, e) => ((e.scaleResolutionDownBy || 1) < (best.scaleResolutionDownBy || 1) ? e : best), (act[0] || p.encodings[0] || {}));
       if (this._pipe && this._tx.kind === 'video') {
         this._pipe.active = e0.active !== false;
         this._pipe.maxBitrate = e0.maxBitrate || null;
@@ -566,6 +764,17 @@
       this._pipe = tx.kind === 'video' ? new VideoRecvPipe(tx) : new AudioRecvPipe(tx);
       this.track = this._pipe.track;
     }
+    get transform() { return this._transform || null; }
+    set transform(t) {
+      if (t != null && !(t instanceof RTCRtpScriptTransform)) throw new TypeError('transform must be an RTCRtpScriptTransform');
+      if (t && t._owner && t._owner !== this) throw new DOMException('transform is already in use', 'InvalidStateError');
+      if (this._transform && this._transform !== t) this._transform._detach();
+      this._transform = t || null; this._ssrc = this._ssrc || nextSsrc();
+      if (t) { t._owner = this; t._sink = (meta, data) => this._pipe._decode(meta.codec, meta.key, meta.ts, data); }
+      if (this._tx.kind === 'audio') this._tx._syncTransform();
+      else if (t) this._pipe._askKey(); // decoding restarts with the transformed stream
+    }
+    _onTransformKeyFrame() { if (this._pipe._askKey) this._pipe._askKey(); }
     getContributingSources() { return []; }
     getSynchronizationSources() { return []; }
     getParameters() { return { codecs: capabilities(this._tx.kind).codecs, headerExtensions: [], rtcp: { cname: '', reducedSize: true } }; }
@@ -615,6 +824,10 @@
       }
       this._codecPrefs = codecs && codecs.length ? codecs : null;
     }
+    _syncTransform() {
+      const send = !!this.sender._transform; const recv = !!this.receiver._transform;
+      this._pc._id.then((id) => invoke('pc_set_transform', { id, tx: this._id, send, recv })).catch(() => {});
+    }
     _spec() {
       return {
         id: this._id, kind: this.kind, direction: this._stopping ? 'stopped' : this._direction,
@@ -636,9 +849,15 @@
 
   // ======================================================= peer connection
 
+  // Close this frame's connections when it goes away: an iframe's peers
+  // would otherwise outlive it in the engine until the window reloads.
+  const livePeers = new Set();
+  window.addEventListener('pagehide', (e) => { if (!e.persisted) for (const pc of [...livePeers]) { try { pc.close(); } catch {} } });
+
   class RTCPeerConnection extends EventTarget {
     constructor(configuration = {}) {
       super();
+      livePeers.add(this);
       this._config = {
         iceServers: (configuration.iceServers || []).map((s) => ({ urls: s.urls ?? s.url, username: s.username, credential: s.credential })),
         iceTransportPolicy: configuration.iceTransportPolicy || 'all',
@@ -656,7 +875,7 @@
       this._orphans = new Map();    // handle -> [events] that arrived before registration
       this._txs = new Map();        // id -> RTCRtpTransceiver, in creation order
       this._nextTx = 1;
-      this._remoteStreams = new Map(); // remote msid stream id -> MediaStream
+      this._trackStreams = new Map(); // remote msid stream id -> MediaStream
       this._closed = false;
       this._chain = Promise.resolve();
       this._opsPending = 0;
@@ -782,12 +1001,12 @@
     }
 
     _stream(id) {
-      let s = this._remoteStreams.get(id);
+      let s = this._trackStreams.get(id);
       if (!s) {
         s = new MediaStream();
         // matrix-js-sdk keys sdp_stream_metadata on the remote msid stream id.
         Object.defineProperty(s, 'id', { value: id, configurable: true });
-        this._remoteStreams.set(id, s);
+        this._trackStreams.set(id, s);
       }
       return s;
     }
@@ -995,8 +1214,8 @@
 
     _onEngine(m) {
       if (this._closed) return;
-      if (m instanceof ArrayBuffer || ArrayBuffer.isView(m) || Array.isArray(m)) {
-        const bytes = m instanceof ArrayBuffer ? new Uint8Array(m) : Array.isArray(m) ? Uint8Array.from(m) : new Uint8Array(m.buffer, m.byteOffset, m.byteLength);
+      if (isArrayBuffer(m) || ArrayBuffer.isView(m) || Array.isArray(m)) {
+        const bytes = isArrayBuffer(m) ? new Uint8Array(m) : Array.isArray(m) ? Uint8Array.from(m) : new Uint8Array(m.buffer, m.byteOffset, m.byteLength);
         const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
         const handle = dv.getUint32(0, true);
         const kind = bytes[4];
@@ -1007,6 +1226,10 @@
         }
         if (kind === 2) { // media frame
           const t = this._txs.get(handle);
+          if (t && !t._stopping && bytes[7] === 1) { // our own Opus, for the sender's transform
+            t.sender._out({ data: bytes.slice(16), key: true, ts: Number(dv.getBigUint64(8, true)), codec: bytes[6], video: false });
+            return;
+          }
           if (t && !t._stopping) t.receiver._pipe.frame(bytes[6], (bytes[5] & 1) === 1, Number(dv.getBigUint64(8, true)), bytes.subarray(16));
           return;
         }
@@ -1037,9 +1260,15 @@
           if (t && t.sender._pipe) t.sender._pipe.forceKey = true;
           break;
         }
-        case 'targetbitrate':
-          for (const t of this._txs.values()) if (t.kind === 'video' && t.sender._pipe && t.sender._pipe.setBitrate) t.sender._pipe.setBitrate(m.bps);
+        case 'targetbitrate': {
+          // Split what remains after audio across active video senders.
+          const video = [...this._txs.values()].filter((t) => t.kind === 'video' && t.sender._pipe && t.sender.track && t.sender._pipe.setBitrate);
+          const audio = [...this._txs.values()].filter((t) => t.kind === 'audio' && t.sender.track).length;
+          const share = Math.max(0, m.bps - audio * 40_000) / Math.max(1, video.length);
+          for (const t of video) t.sender._pipe.setBitrate(share);
+          this._targetBitrate = m.bps;
           break;
+        }
         case 'datachannel': {
           const c = m.channel;
           const dc = new RTCDataChannel(this, c.label, {
@@ -1082,7 +1311,7 @@
 
     close() {
       if (this._closed) return;
-      this._closed = true;
+      this._closed = true; livePeers.delete(this);
       this.signalingState = 'closed';
       this.iceConnectionState = 'closed';
       this.connectionState = 'closed';
@@ -1107,11 +1336,16 @@
   const expose = {
     RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, RTCDataChannel,
     RTCPeerConnectionIceEvent, RTCDataChannelEvent, RTCTrackEvent,
-    RTCRtpSender, RTCRtpReceiver, RTCRtpTransceiver, RTCDTMFSender,
+    RTCRtpSender, RTCRtpReceiver, RTCRtpTransceiver, RTCDTMFSender, RTCRtpScriptTransform,
   };
+  if (TauriWorker) expose.Worker = TauriWorker;
   for (const [name, value] of Object.entries(expose)) {
     Object.defineProperty(window, name, { value, writable: true, configurable: true, enumerable: false });
   }
   Object.defineProperty(window, 'webkitRTCPeerConnection', { value: RTCPeerConnection, writable: true, configurable: true });
-  Object.defineProperty(RTCPeerConnection, '__tauriShim', { value: { level: 'L2', engine: info.engine } });
+  // Marker on the constructor and its prototype (wrappers such as webrtc-adapter
+  // replace the constructor but keep the prototype).
+  const marker = { level: 'L3', engine: info.engine };
+  Object.defineProperty(RTCPeerConnection, '__tauriShim', { value: marker });
+  Object.defineProperty(RTCPeerConnection.prototype, '__tauriShim', { value: marker });
 })();

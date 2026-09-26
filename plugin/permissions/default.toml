@@ -36,6 +36,7 @@ description = "Send and receive encoded media on transceivers."
 permissions = [
   "allow-pc-upsert-transceiver",
   "allow-pc-request-keyframe",
+  "allow-pc-set-transform",
   "allow-media-push",
   "allow-audio-push",
 ]

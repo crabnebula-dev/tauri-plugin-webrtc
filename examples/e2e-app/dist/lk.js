@@ -111,7 +111,7 @@ async function roleLivekit(opts) {
     try {
       (await pc.getStats()).forEach((r) => {
         if (r.type !== 'outbound-rtp' && r.type !== 'inbound-rtp') return;
-        out.rtp.push(pick(r, ['type', 'kind', 'mid', 'framesEncoded', 'keyFramesEncoded', 'framesSent', 'framesDecoded', 'keyFramesDecoded', 'framesReceived', 'frameWidth', 'frameHeight', 'packetsSent', 'packetsReceived', 'pliCount', 'firCount', 'framesDropped', 'ipcMsPerFrame', 'targetBitrate', 'bytesSent', 'bytesReceived']));
+        out.rtp.push(pick(r, ['type', 'kind', 'mid', 'framesEncoded', 'keyFramesEncoded', 'framesSent', 'framesDecoded', 'keyFramesDecoded', 'framesReceived', 'frameWidth', 'frameHeight', 'packetsSent', 'packetsReceived', 'pliCount', 'firCount', 'framesDropped', 'ipcMsPerCall', 'targetBitrate', 'bytesSent', 'bytesReceived', 'transformedSent', 'transformedDropped', 'framesSent']));
       });
     } catch {}
   }
@@ -156,5 +156,13 @@ function lkHarness(name, wsUrl, log = console.log) {
     ws.send(JSON.stringify({ t: 'result', name, what: m.what, result }));
   };
   window.addEventListener('error', (e) => lkLog(`page error: ${e.message}`));
+  if (window.__LK_DEBUG__ && window.LivekitClient) {
+    LivekitClient.setLogLevel('debug');
+    LivekitClient.setLogExtension((level, msg, ctx) => { if (level >= 2 || /track|subscri|negotiat|offer|answer/i.test(msg)) lkLog(`lk[${level}] ${msg} ${JSON.stringify(ctx || {}).slice(0, 300)}`); });
+  }
+  for (const level of window.__LK_DEBUG__ ? ['log', 'info', 'debug', 'warn', 'error'] : ['warn', 'error']) {
+    const orig = console[level].bind(console);
+    console[level] = (...a) => { orig(...a); if ((level === 'log' || level === 'info' || level === 'debug') && !/track|subscri|offer|answer|negotiat|error/i.test(String(a[0]))) return; lkLog(`console.${level}: ${a.map((x) => (x && x.stack) || (typeof x === 'object' ? JSON.stringify(x) : String(x))).join(' ').slice(0, 500)}`); };
+  }
   window.addEventListener('unhandledrejection', (e) => lkLog(`unhandled: ${e.reason && (e.reason.stack || e.reason.message || e.reason)}`));
 }

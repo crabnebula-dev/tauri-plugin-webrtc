@@ -410,8 +410,12 @@ async fn pc_restart_ice<R: Runtime>(
         .map_err(DomError::from)
 }
 
-/// One encoded frame from a page encoder. Raw body: the frame. Headers:
-/// `x-pc`, `x-tx`, `x-codec` (wire id), `x-key` (0/1), `x-ts` (microseconds).
+/// Encoded frames from the page (its encoder, or its transform). Headers:
+/// `x-pc`, `x-tx`, `x-codec` (wire id), and `x-dir: recv` for received
+/// frames coming back from a transform for engine decoding. Raw body: frames
+/// back to back, each `[u8 keyframe][u64 LE timestamp_us][u32 LE len][bytes]`.
+/// One call carries whatever queued up, so IPC latency cannot throttle the
+/// frame rate.
 #[tauri::command]
 async fn media_push<R: Runtime>(
     webview: Webview<R>,
@@ -421,30 +425,43 @@ async fn media_push<R: Runtime>(
     let id: u32 = header(&request, "x-pc")?;
     let tx: TxId = header(&request, "x-tx")?;
     let codec: u8 = header(&request, "x-codec")?;
-    let key: u8 = header(&request, "x-key")?;
-    let ts: u64 = header(&request, "x-ts")?;
     let codec = CodecName::from_wire_id(codec).ok_or_else(|| dom("TypeError", "unknown codec"))?;
     let InvokeBody::Raw(body) = request.body() else {
         return Err(dom("TypeError", "media_push expects a raw body"));
     };
-    let p = state.peer(webview.label(), id)?;
-    if request
+    let recv = request
         .headers()
         .get("x-dir")
         .map(|v| v == "recv")
-        .unwrap_or(false)
-    {
-        // A received frame back from the page's transform, for engine decode.
-        return p.decode_audio(tx, body.clone()).map_err(DomError::from);
+        .unwrap_or(false);
+    let p = state.peer(webview.label(), id)?;
+    let mut rest = &body[..];
+    while !rest.is_empty() {
+        if rest.len() < 13 {
+            return Err(dom("TypeError", "truncated media frame header"));
+        }
+        let key = rest[0] == 1;
+        let ts = u64::from_le_bytes(rest[1..9].try_into().expect("8 bytes"));
+        let len = u32::from_le_bytes(rest[9..13].try_into().expect("4 bytes")) as usize;
+        let Some(data) = rest.get(13..13 + len) else {
+            return Err(dom("TypeError", "truncated media frame"));
+        };
+        rest = &rest[13 + len..];
+        if recv {
+            // A received frame back from the page's transform, for engine decode.
+            p.decode_audio(tx, data.to_vec()).map_err(DomError::from)?;
+        } else {
+            p.send_frame(EncodedFrame {
+                tx,
+                codec,
+                keyframe: key,
+                timestamp_us: ts,
+                data: data.into(),
+            })
+            .map_err(DomError::from)?;
+        }
     }
-    p.send_frame(EncodedFrame {
-        tx,
-        codec,
-        keyframe: key == 1,
-        timestamp_us: ts,
-        data: body.clone().into(),
-    })
-    .map_err(DomError::from)
+    Ok(())
 }
 
 /// Captured PCM for an audio sender. Raw body: i16 LE, 48 kHz mono.

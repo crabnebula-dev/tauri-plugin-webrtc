@@ -251,10 +251,13 @@
   }
 
   // Sequential IPC for one sender: frames must reach the engine in order.
+  // Ordered delivery of encoded frames for one transceiver. Everything that
+  // queued while the previous call was in flight goes in the next call, so IPC
+  // latency costs delay, not frames.
   class FramePusher {
-    constructor(pc, txId, extra) { this.pc = pc; this.txId = txId; this.extra = extra || {}; this.q = []; this.busy = false; this.sent = 0; this.bytes = 0; this.dropped = 0; }
+    constructor(pc, txId, extra) { this.pc = pc; this.txId = txId; this.extra = extra || {}; this.q = []; this.busy = false; this.sent = 0; this.bytes = 0; this.dropped = 0; this.calls = 0; this.ipcMs = 0; }
     push(frame) {
-      if (this.q.length > 8) { // bounded latency: drop the backlog, ask for a keyframe
+      if (this.q.length >= 50) { // about a second behind: drop the backlog, video asks for a keyframe
         this.dropped += this.q.length; this.q.length = 0; this.onBacklog && this.onBacklog();
         if (!frame.key) return;
       }
@@ -265,11 +268,17 @@
       try {
         const id = await this.pc._id;
         while (this.q.length) {
-          const f = this.q.shift();
+          const frames = this.q.splice(0, this.q.length);
+          const body = new Uint8Array(frames.reduce((n, f) => n + 13 + f.data.byteLength, 0));
+          const dv = new DataView(body.buffer); let o = 0;
+          for (const f of frames) {
+            body[o] = f.key ? 1 : 0; dv.setBigUint64(o + 1, BigInt(Math.max(0, Math.round(f.ts))), true);
+            dv.setUint32(o + 9, f.data.byteLength, true); body.set(f.data, o + 13); o += 13 + f.data.byteLength;
+          }
           const t0 = performance.now();
-          await invoke('media_push', f.data, { headers: { ...this.extra, 'x-pc': String(id), 'x-tx': String(this.txId), 'x-codec': String(f.codec), 'x-key': f.key ? '1' : '0', 'x-ts': String(f.ts) } });
-          this.ipcMs = (this.ipcMs || 0) + (performance.now() - t0);
-          this.sent++; this.bytes += f.data.byteLength;
+          await invoke('media_push', body, { headers: { ...this.extra, 'x-pc': String(id), 'x-tx': String(this.txId), 'x-codec': String(frames[0].codec) } });
+          this.ipcMs += performance.now() - t0; this.calls++;
+          this.sent += frames.length; this.bytes += body.byteLength;
         }
       } catch (e) { /* pc closed */ } finally { this.busy = false; }
     }
@@ -366,7 +375,7 @@
       if (this.encoder) this._configure(this.srcW, this.srcH);
     }
     stop() { this.stopped = true; if (this.encoder && this.encoder.state !== 'closed') this.encoder.close(); if (this.video) { this.video.srcObject = null; this.video.remove(); } }
-    stats() { return { framesEncoded: this.framesEncoded, keyFramesEncoded: this.keyFramesEncoded, framesSent: this.pusher.sent, bytesSent: this.pusher.bytes, frameWidth: this.w, frameHeight: this.h, targetBitrate: this.bitrate, framesDropped: this.pusher.dropped, ipcMsPerFrame: this.pusher.sent ? +(this.pusher.ipcMs / this.pusher.sent).toFixed(2) : null }; }
+    stats() { return { framesEncoded: this.framesEncoded, keyFramesEncoded: this.keyFramesEncoded, framesSent: this.pusher.sent, bytesSent: this.pusher.bytes, frameWidth: this.w, frameHeight: this.h, targetBitrate: this.bitrate, framesDropped: this.pusher.dropped, ipcMsPerCall: this.pusher.calls ? +(this.pusher.ipcMs / this.pusher.calls).toFixed(2) : null }; }
   }
 
   class VideoRecvPipe {
@@ -1115,8 +1124,13 @@
             events.push(new RTCTrackEvent('track', { receiver: t.receiver, track, streams, transceiver: t }));
           } else {
             for (const s of t._recvStreams) if (!streams.includes(s)) { try { s.removeTrack(track); } catch {} s.dispatchEvent(trackEvent('removetrack', track)); }
-            for (const s of streams) if (!t._recvStreams.includes(s)) { s.addTrack(track); s.dispatchEvent(trackEvent('addtrack', track)); }
+            const added = streams.filter((s) => !t._recvStreams.includes(s));
+            for (const s of added) { s.addTrack(track); s.dispatchEvent(trackEvent('addtrack', track)); }
             t._recvStreams = streams;
+            // W3C: a grown set of associated streams fires track again. An SFU
+            // may answer before it knows the msid (LiveKit does), and pages
+            // ignore a track event without streams.
+            if (added.length) events.push(new RTCTrackEvent('track', { receiver: t.receiver, track, streams, transceiver: t }));
           }
         } else if (!sends) {
           this._removeRemoteTrack(t);
@@ -1382,7 +1396,7 @@
       for (const t of this._txs.values()) {
         if (!t._mid) continue;
         if (t.receiver._pipe) report.set(`IN${t._id}`, { id: `IN${t._id}`, type: 'inbound-rtp', kind: t.kind, mid: t._mid, timestamp: ts, trackIdentifier: t.receiver.track && t.receiver.track.id, ...t.receiver._pipe.stats() });
-        if (t.sender._pipe) report.set(`OUT${t._id}`, { id: `OUT${t._id}`, type: 'outbound-rtp', kind: t.kind, mid: t._mid, timestamp: ts, ...t.sender._pipe.stats() });
+        if (t.sender._pipe) report.set(`OUT${t._id}`, { id: `OUT${t._id}`, type: 'outbound-rtp', kind: t.kind, mid: t._mid, timestamp: ts, ...t.sender._pipe.stats(), ...(t.sender._encPusher ? { transformedSent: t.sender._encPusher.sent, transformedDropped: t.sender._encPusher.dropped } : {}) });
       }
       if (selector) for (const [k, v] of [...report]) if (v.kind && v.kind !== selector.kind) report.delete(k);
       return report;

@@ -101,7 +101,7 @@ const app = spawn('xvfb-run', ['-a', appBin], {
     ...(tchap ? {
       TCHAP_WEBRTC_E2E_WS: wsUrl,
       TCHAP_WEBRTC_E2E_SCRIPTS: [...['lk/livekit-client.umd.js', 'lk-pcs.js', 'lk.js'].map((f) => path.join(dist, f)), tchapWorker].join(':'),
-      TCHAP_WEBRTC_E2E_BOOT: "lkRecordPcs(); lkHarness('webkit', window.__E2E_WS__)",
+      TCHAP_WEBRTC_E2E_BOOT: `${process.env.LK_DEBUG ? 'window.__LK_DEBUG__ = true; ' : ''}lkRecordPcs(); lkHarness('webkit', window.__E2E_WS__)`,
     } : {}),
   },
   stdio: ['ignore', 'inherit', 'pipe'],

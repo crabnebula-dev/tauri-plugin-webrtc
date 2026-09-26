@@ -544,6 +544,7 @@
       this.track = track;
       if (this.src) { try { this.src.disconnect(); } catch {} this.src = null; }
       if (!track) return;
+      this._syncProcessing(track);
       audioWorklets().then((env) => {
         if (this.stopped || this.track !== track) return;
         if (!this.node) {
@@ -553,6 +554,19 @@
         this.src = env.c.createMediaStreamSource(new MediaStream([track]));
         this.src.connect(this.node);
       }).catch((e) => console.warn('[tauri-webrtc] audio capture', e));
+    }
+    // Like browsers, process microphone tracks only (echo cancellation, noise
+    // suppression, AGC, each as the track's settings say). A track from
+    // WebAudio, a canvas or a file goes out untouched.
+    _syncProcessing(track) {
+      let st = {};
+      try { st = (track.getSettings && track.getSettings()) || {}; } catch {}
+      const mic = !!st.deviceId || 'echoCancellation' in st;
+      const on = (k) => mic && st[k] !== false;
+      const tx = this.sender._tx;
+      tx._pc._id.then((id) => invoke('pc_audio_processing', {
+        id, tx: tx._id, echoCancellation: on('echoCancellation'), noiseSuppression: on('noiseSuppression'), autoGainControl: on('autoGainControl'),
+      })).catch(() => {});
     }
     _frame(buf) {
       if (this.stopped || !this.track) return;

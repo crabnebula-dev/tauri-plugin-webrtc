@@ -55,6 +55,8 @@ async function lkWatchVideo(mediaTrack, ms = 3000) {
   const v = document.createElement('video'); v.muted = true; v.playsInline = true; v.autoplay = true;
   v.style.width = '160px'; document.body.appendChild(v);
   v.srcObject = new MediaStream([mediaTrack]); await Promise.race([v.play().catch(() => {}), new Promise((r) => setTimeout(r, 2000))]);
+  // A large first keyframe (screen share) can take a few seconds at the initial bandwidth estimate.
+  for (let i = 0; i < 80 && !v.videoWidth; i++) await new Promise((r) => setTimeout(r, 100));
   let frames = 0; const t0 = performance.now();
   const tick = () => { frames++; if (performance.now() - t0 < ms) v.requestVideoFrameCallback(tick); };
   if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(tick);

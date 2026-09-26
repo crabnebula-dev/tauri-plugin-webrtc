@@ -11,6 +11,7 @@ const COMMANDS: &[&str] = &[
     "pc_request_keyframe",
     "pc_restart_ice",
     "pc_set_transform",
+    "pc_audio_processing",
     "media_push",
     "audio_push",
     "dc_create",

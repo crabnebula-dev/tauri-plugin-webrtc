@@ -78,6 +78,8 @@ async function mxWatch(stream, ms = 2500) {
   const v = document.createElement('video'); v.muted = true; v.playsInline = true; v.autoplay = true; v.style.width = '160px';
   document.body.appendChild(v); v.srcObject = new MediaStream([t]);
   await Promise.race([v.play().catch(() => {}), sleep(2000)]);
+  // A large first keyframe (screen share) can take a few seconds at the initial bandwidth estimate.
+  for (let i = 0; i < 80 && !v.videoWidth; i++) await new Promise((r) => setTimeout(r, 100));
   let frames = 0; const t0 = performance.now();
   const tick = () => { frames++; if (performance.now() - t0 < ms) v.requestVideoFrameCallback(tick); };
   if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(tick);
@@ -153,6 +155,8 @@ async function roleMatrixCall(o) {
     mxLog(`screenshare started ${out.screenshareStarted}`);
     await o.sig('screen-on');
     await o.sig('screen-seen');
+    out.outbound = [];
+    try { (await call.peerConn.getStats()).forEach((r) => { if (r.type === 'outbound-rtp' && r.kind === 'video') out.outbound.push({ mid: r.mid, framesEncoded: r.framesEncoded, keyFramesEncoded: r.keyFramesEncoded, framesSent: r.framesSent, frameWidth: r.frameWidth, framesDropped: r.framesDropped, targetBitrate: r.targetBitrate }); }); } catch (e) { out.outbound = String(e); }
     await call.setScreensharingEnabled(false);
     await o.sig('screen-off');
     await sleep(1500);

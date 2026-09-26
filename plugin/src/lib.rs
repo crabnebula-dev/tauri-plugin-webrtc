@@ -386,6 +386,22 @@ async fn pc_set_transform<R: Runtime>(
 }
 
 #[tauri::command]
+async fn pc_audio_processing<R: Runtime>(
+    webview: Webview<R>,
+    state: State<'_, WebrtcState>,
+    id: u32,
+    tx: TxId,
+    echo_cancellation: bool,
+    noise_suppression: bool,
+    auto_gain_control: bool,
+) -> CmdResult<()> {
+    state
+        .peer(webview.label(), id)?
+        .set_audio_processing(tx, echo_cancellation, noise_suppression, auto_gain_control)
+        .map_err(DomError::from)
+}
+
+#[tauri::command]
 async fn pc_request_keyframe<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, WebrtcState>,
@@ -601,6 +617,7 @@ impl Builder {
                 pc_upsert_transceiver,
                 pc_request_keyframe,
                 pc_set_transform,
+                pc_audio_processing,
                 pc_restart_ice,
                 media_push,
                 audio_push,

@@ -3,6 +3,7 @@
 // each checks it hears and sees the other. Runs without and with E2EE
 // (livekit-client's own worker, RTCRtpScriptTransform on the WebKit side).
 // Usage: node livekit-e2e.mjs [--app path/to/e2e-app] [--only plain|e2ee] [--no-simulcast] [--iframe]
+//        [--tchap]  (--app is a Tchap build with the TEST ONLY harness hook)
 import { chromium } from 'playwright-core';
 import { WebSocketServer } from 'ws';
 import { AccessToken } from 'livekit-server-sdk';
@@ -23,6 +24,10 @@ const simulcast = !argv.includes('--no-simulcast');
 // --iframe: the WebKit side runs inside a sandboxed same-origin iframe, as
 // Element Call does when embedded in Element Web / Tchap.
 const iframe = argv.includes('--iframe');
+const tchap = argv.includes('--tchap');
+// Tchap has no copy of the worker: hand it over as a blob URL (a bundler
+// inline worker, which the shim wraps too).
+const tchapWorker = path.join(os.tmpdir(), 'tauri-webrtc-lk-worker.js');
 const exe = process.env.CHROMIUM || '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
 const lkBin = process.env.LIVEKIT_SERVER || '/home/claude/livekit/livekit-server';
 const dist = path.join(root, 'examples/e2e-app/dist');
@@ -85,9 +90,20 @@ await page.addInitScript((u) => { window.__E2E_WS__ = u; window.__E2E_NAME__ = '
 await page.goto(`http://127.0.0.1:${http.address().port}/lk.html`);
 
 const killGroup = (p) => { try { process.kill(-p.pid, 'SIGTERM'); } catch { p.kill('SIGTERM'); } };
+if (tchap) {
+  const src = readFileSync(path.join(dist, 'lk/livekit-client.e2ee.worker.mjs'), 'utf8');
+  writeFileSync(tchapWorker, `window.__LK_WORKER_URL__ = URL.createObjectURL(new Blob([${JSON.stringify(src)}], { type: 'text/javascript' }));\n`);
+}
 const app = spawn('xvfb-run', ['-a', appBin], {
   detached: true, // own process group: xvfb-run, Xvfb and the app die together
-  env: { ...process.env, E2E_WS: wsUrl, E2E_PAGE: iframe ? 'lk-frame.html' : 'lk.html', RUST_LOG: process.env.RUST_LOG || 'warn' },
+  env: {
+    ...process.env, E2E_WS: wsUrl, E2E_PAGE: iframe ? 'lk-frame.html' : 'lk.html', RUST_LOG: process.env.RUST_LOG || 'warn',
+    ...(tchap ? {
+      TCHAP_WEBRTC_E2E_WS: wsUrl,
+      TCHAP_WEBRTC_E2E_SCRIPTS: [...['lk/livekit-client.umd.js', 'lk-pcs.js', 'lk.js'].map((f) => path.join(dist, f)), tchapWorker].join(':'),
+      TCHAP_WEBRTC_E2E_BOOT: "lkRecordPcs(); lkHarness('webkit', window.__E2E_WS__)",
+    } : {}),
+  },
   stdio: ['ignore', 'inherit', 'pipe'],
 });
 app.stderr.on('data', (d) => {

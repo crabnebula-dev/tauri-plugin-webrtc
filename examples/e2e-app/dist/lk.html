@@ -1,14 +1,7 @@
 <!doctype html>
 <html><head><meta charset="utf-8"><title>livekit e2e</title></head>
 <body><pre id="log">starting</pre>
-<script>
-  // Keep every peer connection so the scenario can dump raw RTP stats.
-  window.__pcs = [];
-  if (window.RTCPeerConnection) {
-    const P = window.RTCPeerConnection;
-    window.RTCPeerConnection = new Proxy(P, { construct(t, a, nt) { const pc = Reflect.construct(t, a, nt); window.__pcs.push(pc); return pc; } });
-  }
-</script>
+<script src="lk-pcs.js"></script>
 <script src="lk/livekit-client.umd.js"></script>
 <script src="lk.js"></script>
 <script>

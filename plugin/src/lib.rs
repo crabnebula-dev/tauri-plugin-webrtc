@@ -351,7 +351,7 @@ async fn dc_send<R: Runtime>(
     };
     let batch = parse_batch(body)?;
     let p = state.peer(webview.label(), id)?;
-    // webrtcbin's send only queues; no need for the blocking pool.
+    // The engine's send only queues a command; no need for the blocking pool.
     for payload in batch {
         p.dc_send(handle, payload)?;
     }
@@ -545,7 +545,7 @@ impl Builder {
         self
     }
 
-    /// Use a different engine than the default GStreamer one.
+    /// Use a different engine than the default (native, pure Rust) one.
     pub fn engine(mut self, engine: Arc<dyn PeerEngine>) -> Self {
         self.engine = Some(engine);
         self

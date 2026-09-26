@@ -1,6 +1,6 @@
 // End to end: Tauri app (WebKitGTK + tauri-plugin-webrtc shim) <-> Chromium.
 // Both sides run examples/e2e-app/dist/scenarios.js using standard APIs only.
-// Usage: node shim-e2e.mjs [--mdns] [--app path/to/e2e-app]
+// Usage: node shim-e2e.mjs [--mdns] [--app path/to/e2e-app] [--page index-csp.html]
 import { chromium } from 'playwright-core';
 import { WebSocketServer } from 'ws';
 import { spawn } from 'node:child_process';
@@ -12,6 +12,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
 const appBin = argv.includes('--app') ? argv[argv.indexOf('--app') + 1] : path.join(root, 'target/debug/e2e-app');
 const mdns = argv.includes('--mdns');
+const pageName = argv.includes('--page') ? argv[argv.indexOf('--page') + 1] : 'index.html';
 const exe = process.env.CHROMIUM || '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
 const scenarios = readFileSync(path.join(root, 'examples/e2e-app/dist/scenarios.js'), 'utf8');
 
@@ -58,7 +59,7 @@ await page.evaluate((u) => connectHarness('chromium', u), url);
 const killGroup = (p) => { try { process.kill(-p.pid, 'SIGTERM'); } catch { p.kill('SIGTERM'); } };
 const app = spawn('xvfb-run', ['-a', appBin], {
   detached: true, // own process group: xvfb-run, Xvfb and the app die together
-  env: { ...process.env, E2E_WS: url, TCHAP_WEBRTC_E2E_WS: url, TCHAP_WEBRTC_E2E_SCENARIOS: path.join(root, 'examples/e2e-app/dist/scenarios.js'), RUST_LOG: process.env.RUST_LOG || 'warn' },
+  env: { ...process.env, E2E_WS: url, E2E_PAGE: pageName, TCHAP_WEBRTC_E2E_WS: url, TCHAP_WEBRTC_E2E_SCENARIOS: path.join(root, 'examples/e2e-app/dist/scenarios.js'), RUST_LOG: process.env.RUST_LOG || 'warn' },
   stdio: ['ignore', 'inherit', 'pipe'],
 });
 app.stderr.on('data', (d) => {

@@ -5,6 +5,7 @@
 // The homeserver is Synapse, used as an external test fixture (set
 // SYNAPSE_PY to a Python with matrix-synapse installed).
 // Usage: node matrix-e2e.mjs [--app path/to/e2e-app] [--only webkit-calls|chromium-calls]
+//        [--tchap]  (--app is a Tchap build with the TEST ONLY harness hook)
 import { chromium } from 'playwright-core';
 import { WebSocketServer } from 'ws';
 import { spawn, execFileSync } from 'node:child_process';
@@ -20,6 +21,7 @@ const argv = process.argv.slice(2);
 const arg = (n, d) => (argv.includes(n) ? argv[argv.indexOf(n) + 1] : d);
 const appBin = arg('--app', path.join(root, 'target/debug/e2e-app'));
 const only = arg('--only', null);
+const tchap = argv.includes('--tchap');
 const exe = process.env.CHROMIUM || '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
 const py = process.env.SYNAPSE_PY || '/home/claude/synapse-venv/bin/python';
 const dist = path.join(root, 'examples/e2e-app/dist');
@@ -115,7 +117,14 @@ await page.goto(`http://127.0.0.1:${http.address().port}/mx.html`);
 const killGroup = (p) => { try { process.kill(-p.pid, 'SIGTERM'); } catch { p.kill('SIGTERM'); } };
 const app = spawn('xvfb-run', ['-a', appBin], {
   detached: true,
-  env: { ...process.env, E2E_WS: wsUrl, E2E_PAGE: 'mx.html', RUST_LOG: process.env.RUST_LOG || 'warn' },
+  env: {
+    ...process.env, E2E_WS: wsUrl, E2E_PAGE: 'mx.html', RUST_LOG: process.env.RUST_LOG || 'warn',
+    ...(tchap ? {
+      TCHAP_WEBRTC_E2E_WS: wsUrl,
+      TCHAP_WEBRTC_E2E_SCRIPTS: ['mx/matrix.js', 'mx.js'].map((f) => path.join(dist, f)).join(':'),
+      TCHAP_WEBRTC_E2E_BOOT: "mxHarness('webkit', window.__E2E_WS__)",
+    } : {}),
+  },
   stdio: ['ignore', 'inherit', 'pipe'],
 });
 app.stderr.on('data', (d) => { const s = String(d); if (!/libEGL|MESA|DRI3|dbus|D-Bus|EGL display|AT-SPI|GStreamer-CRITICAL|ALSA|pw\.conf|ALSOFT|^\s*$/i.test(s)) process.stderr.write('[app] ' + s); });

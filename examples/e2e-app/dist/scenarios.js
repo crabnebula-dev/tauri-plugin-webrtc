@@ -3,7 +3,8 @@
 
 function describeEnv() {
   const shim = window.RTCPeerConnection && RTCPeerConnection.__tauriShim;
-  return { shim: shim || null, ua: navigator.userAgent };
+  // Under a CSP without blob: scripts the shim withdraws RTCRtpScriptTransform.
+  return { shim: shim || null, ua: navigator.userAgent, scriptTransform: typeof window.RTCRtpScriptTransform };
 }
 
 // Checks that only make sense against the shim: error mapping and states.
@@ -375,5 +376,5 @@ async function roleAudio(sig, opts) {
   if (offer) await new Promise((r) => setTimeout(r, 300));
   src.stop(); pc.close();
   const ok = !!heard && heard.peakHz !== null && Math.abs(heard.peakHz - expect) < 25 && heard.rmsMax > 0.05;
-  return { ok, heard, expect, connectionState: pc.connectionState, stats: { packetsReceived: stats.packetsReceived, concealedPackets: stats.concealedPackets, underruns: stats.underruns, jitterBufferFrames: stats.jitterBufferFrames, jitterTargetFrames: stats.jitterTargetFrames } };
+  return { ok, heard, expect, connectionState: pc.connectionState, stats: { packetsReceived: stats.packetsReceived, concealedPackets: stats.concealedPackets, underruns: stats.underruns, jitterBufferFrames: stats.jitterBufferFrames, jitterTargetFrames: stats.jitterTargetFrames, audioPath: stats.audioPath } };
 }

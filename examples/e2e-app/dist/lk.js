@@ -47,7 +47,8 @@ async function lkAnalyse(mediaTrack, ms = 3000) {
   }
   ac.close(); el.srcObject = null;
   peaks.sort((a, b) => a - b);
-  return { peakHz: peaks.length ? peaks[Math.floor(peaks.length / 2)] : null, rmsMax: +rmsMax.toFixed(3) };
+  const hist = {}; for (const p of peaks) hist[p] = (hist[p] || 0) + 1;
+  return { peakHz: peaks.length ? peaks[Math.floor(peaks.length / 2)] : null, rmsMax: +rmsMax.toFixed(3), hist };
 }
 
 async function lkWatchVideo(mediaTrack, ms = 3000) {
@@ -78,7 +79,7 @@ async function roleLivekit(opts) {
   let keyProvider = null;
   if (e2ee) {
     keyProvider = new LK.ExternalE2EEKeyProvider();
-    roomOpts.e2ee = { keyProvider, worker: new Worker(new URL('lk/livekit-client.e2ee.worker.mjs', location.href), { type: 'module' }) };
+    roomOpts.e2ee = { keyProvider, worker: new Worker(window.__LK_WORKER_URL__ || new URL('lk/livekit-client.e2ee.worker.mjs', location.href), { type: 'module' }) };
   }
   const room = new LK.Room(roomOpts);
   room.on(LK.RoomEvent.EncryptionError, (e) => out.errors.push(`encryption: ${e && e.message}`));

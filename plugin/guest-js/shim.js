@@ -462,14 +462,67 @@
     registerProcessor('tauri-webrtc-capture', Capture);
     registerProcessor('tauri-webrtc-playout', Playout);
   `;
+  // The worklet module loads from a blob: URL. A page whose CSP has no blob:
+  // in script-src (Tchap's main window, for one) refuses it; the same two
+  // processors then run as ScriptProcessorNodes on the main thread.
   let workletReady = null;
   function audioWorklets() {
     if (!workletReady) {
       const c = ctx();
-      workletReady = c.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' })))
-        .then(() => { c.resume().catch(() => {}); return c; });
+      const fallback = (why) => { console.info('[tauri-webrtc] AudioWorklet unavailable, using ScriptProcessor:', why); return { c, worklet: false }; };
+      workletReady = (c.audioWorklet && !info.noWorklet
+        ? c.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' }))).then(() => ({ c, worklet: true }), (e) => fallback(e && e.message))
+        : Promise.resolve(fallback('not supported')))
+        .then((env) => { c.resume().catch(() => {}); return env; });
     }
     return workletReady;
+  }
+  // ScriptProcessors only run when they reach the destination (WebKit).
+  const keepAlive = (c, node) => { const g = c.createGain(); g.gain.value = 0; node.connect(g).connect(c.destination); };
+  function captureNode(env) {
+    if (env.worklet) return new AudioWorkletNode(env.c, 'tauri-webrtc-capture', { numberOfInputs: 1, numberOfOutputs: 0, channelCount: 2, channelCountMode: 'explicit' });
+    const node = env.c.createScriptProcessor(2048, 2, 1);
+    const port = { onmessage: null };
+    let buf = new Int16Array(960); let n = 0;
+    node.onaudioprocess = (e) => {
+      const a = e.inputBuffer.getChannelData(0); const b = e.inputBuffer.numberOfChannels > 1 ? e.inputBuffer.getChannelData(1) : null;
+      for (let i = 0; i < a.length; i++) {
+        let v = b ? (a[i] + b[i]) * 0.5 : a[i];
+        v = v < -1 ? -1 : v > 1 ? 1 : v;
+        buf[n++] = v * 32767;
+        if (n === 960) { if (port.onmessage) port.onmessage({ data: buf.buffer }); buf = new Int16Array(960); n = 0; }
+      }
+      e.outputBuffer.getChannelData(0).fill(0);
+    };
+    keepAlive(env.c, node);
+    node.port = port;
+    return node;
+  }
+  function playoutNode(env) {
+    if (env.worklet) return new AudioWorkletNode(env.c, 'tauri-webrtc-playout', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] });
+    const node = env.c.createScriptProcessor(2048, 1, 1);
+    const ring = new Float32Array(48000); let r = 0; let w = 0; let size = 0; let primed = false;
+    node.port = {
+      postMessage(data) {
+        const s16 = new Int16Array(data);
+        for (let i = 0; i < s16.length; i++) {
+          if (size === ring.length) { r = (r + 1) % ring.length; size--; }
+          ring[w] = s16[i] / 32768; w = (w + 1) % ring.length; size++;
+        }
+        // Main-thread callbacks are coarser: allow a deeper buffer than the worklet.
+        if (size > 12000) { const d = size - 4800; r = (r + d) % ring.length; size -= d; }
+      },
+    };
+    node.onaudioprocess = (e) => {
+      const out = e.outputBuffer.getChannelData(0);
+      if (!primed && size >= 4800) primed = true;
+      for (let i = 0; i < out.length; i++) {
+        if (primed && size > 0) { out[i] = ring[r]; r = (r + 1) % ring.length; size--; } else out[i] = 0;
+      }
+      if (primed && size === 0) primed = false;
+    };
+    keepAlive(env.c, node);
+    return node;
   }
 
   class AudioSendPipe {
@@ -482,13 +535,13 @@
       this.track = track;
       if (this.src) { try { this.src.disconnect(); } catch {} this.src = null; }
       if (!track) return;
-      audioWorklets().then((c) => {
+      audioWorklets().then((env) => {
         if (this.stopped || this.track !== track) return;
         if (!this.node) {
-          this.node = new AudioWorkletNode(c, 'tauri-webrtc-capture', { numberOfInputs: 1, numberOfOutputs: 0, channelCount: 2, channelCountMode: 'explicit' });
+          this.node = captureNode(env);
           this.node.port.onmessage = (e) => this._frame(e.data);
         }
-        this.src = c.createMediaStreamSource(new MediaStream([track]));
+        this.src = env.c.createMediaStreamSource(new MediaStream([track]));
         this.src.connect(this.node);
       }).catch((e) => console.warn('[tauri-webrtc] audio capture', e));
     }
@@ -523,8 +576,8 @@
         const c = ctx();
         this.dest = c.createMediaStreamDestination();
         this.track = this.dest.stream.getAudioTracks()[0];
-        audioWorklets().then((c2) => {
-          this.node = new AudioWorkletNode(c2, 'tauri-webrtc-playout', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] });
+        audioWorklets().then((env) => {
+          this.node = playoutNode(env);
           this.node.connect(this.dest);
           for (const p of this.pending.splice(0)) this.node.port.postMessage(p, [p]);
         }).catch((e) => console.warn('[tauri-webrtc] audio playout', e));
@@ -547,7 +600,7 @@
       this.back.push({ data: data.slice(), key: true, ts, codec });
     }
     stop() { if (this.node) try { this.node.disconnect(); } catch {} if (this.track) this.track.stop(); }
-    stats() { return { packetsReceived: this.framesReceived, totalSamplesReceived: this.samples }; }
+    stats() { return { packetsReceived: this.framesReceived, totalSamplesReceived: this.samples, audioPath: this.node ? (typeof AudioWorkletNode !== 'undefined' && this.node instanceof AudioWorkletNode ? 'worklet' : 'script-processor') : null }; }
   }
 
   // ================================================ encoded transforms
@@ -567,7 +620,7 @@
       const loc = { href: real.href, origin: real.origin, protocol: real.protocol, host: real.host, hostname: real.hostname,
         port: real.port, pathname: real.pathname, search: real.search, hash: real.hash, toString() { return real.href; } };
       try { Object.defineProperty(self, 'location', { get: () => loc, configurable: true }); } catch {}
-      const rel = (u) => (typeof u === 'string' ? new URL(u, real).href : u);
+      const rel = (u) => { try { return typeof u === 'string' ? new URL(u, real).href : u; } catch { return u; } };
       const f = self.fetch; if (f) self.fetch = (u, o) => f.call(self, u instanceof Request ? u : rel(String(u)), o);
       const is = self.importScripts; if (is) self.importScripts = (...u) => is.apply(self, u.map((x) => rel(String(x))));
       if (self.XMLHttpRequest) { const o = XMLHttpRequest.prototype.open; XMLHttpRequest.prototype.open = function (m, u, ...r) { return o.call(this, m, rel(String(u)), ...r); }; }
@@ -624,33 +677,59 @@
       self.dispatchEvent(new RTCTransformEvent('rtctransform', { transformer }));
     });
   })();`;
+  // The wrapper loads the polyfill from a blob: URL inside the worker, which
+  // script-src must allow. Under a CSP that refuses blob: scripts (Tchap's
+  // main window), wrapping would break every worker, so workers stay native
+  // there. The probe waits for the DOM so a <meta> CSP is already in force;
+  // workers created before it settles are left native.
+  let blobScripts = false;
+  const probeBlobScripts = () => {
+    import(URL.createObjectURL(new Blob(['export {};'], { type: 'text/javascript' })))
+      .then(() => { blobScripts = true; }, () => {
+        // No transforms without the worker polyfill: say so, like a browser
+        // without RTCRtpScriptTransform, rather than stall media in a worker.
+        blobScripts = false;
+        try { delete window.RTCRtpScriptTransform; if (NativeWorker) window.Worker = NativeWorker; } catch {}
+      });
+  };
+  try {
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', probeBlobScripts, { once: true });
+    else probeBlobScripts();
+  } catch { /* no dynamic import */ }
   const NativeWorker = window.Worker;
   const TauriWorker = NativeWorker && info.wrapWorkers !== false ? class Worker extends NativeWorker {
     constructor(url, options) {
       let wrapped = null;
-      try {
+      if (blobScripts) try {
         const real = new URL(String(url), document.baseURI).href;
-        if (!real.startsWith('blob:') && !real.startsWith('data:')) {
-          // Imports evaluate in order, so the polyfill (with the real URL baked
-          // in) runs before the worker script defines its handlers.
-          const poly = URL.createObjectURL(new Blob([`self.__tauriWorkerUrl = ${JSON.stringify(real)};\n${WORKER_POLYFILL}`], { type: 'text/javascript' }));
-          const src = options && options.type === 'module'
-            ? `import ${JSON.stringify(poly)};\nimport ${JSON.stringify(real)};\n`
-            : `importScripts(${JSON.stringify(poly)});\nimportScripts(${JSON.stringify(real)});\n`;
-          wrapped = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+        // blob: workers (bundler inline workers) are wrapped too. Bundlers revoke
+        // the URL right after construction, so read it now and load a copy.
+        let load = real;
+        if (real.startsWith('blob:')) {
+          const x = new XMLHttpRequest(); x.open('GET', real, false); x.send();
+          load = URL.createObjectURL(new Blob([x.responseText], { type: 'text/javascript' }));
         }
+        // Imports evaluate in order, so the polyfill (with the real URL baked
+        // in) runs before the worker script defines its handlers.
+        const poly = URL.createObjectURL(new Blob([`self.__tauriWorkerUrl = ${JSON.stringify(real)};\n${WORKER_POLYFILL}`], { type: 'text/javascript' }));
+        const src = options && options.type === 'module'
+          ? `import ${JSON.stringify(poly)};\nimport ${JSON.stringify(load)};\n`
+          : `importScripts(${JSON.stringify(poly)});\nimportScripts(${JSON.stringify(load)});\n`;
+        wrapped = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
       } catch { wrapped = null; }
       if (wrapped) {
-        try { super(wrapped, options); return; } catch (e) { console.warn('[tauri-webrtc] worker wrapper refused, transforms unavailable in it', e); }
+        try { super(wrapped, options); wrappedWorkers.add(this); return; } catch (e) { console.warn('[tauri-webrtc] worker wrapper refused, transforms unavailable in it', e); }
       }
       super(url, options);
     }
   } : null;
 
+  const wrappedWorkers = new WeakSet();
   let transformSsrc = 0x1000;
   class RTCRtpScriptTransform {
     constructor(worker, options, transfer) {
       if (!worker || typeof worker.postMessage !== 'function') throw new TypeError('RTCRtpScriptTransform needs a Worker');
+      if (!wrappedWorkers.has(worker)) throw new DOMException('this worker was started without encoded-transform support', 'NotSupportedError');
       const ch = new MessageChannel();
       this._port = ch.port1; this._pending = new Map(); this._seq = 0; this._sink = null; this._owner = null;
       this._port.onmessage = (e) => {

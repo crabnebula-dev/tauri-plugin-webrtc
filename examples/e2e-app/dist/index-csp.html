@@ -1,0 +1,10 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<!-- Tchap's CSP: no blob: in script-src, so no AudioWorklet from a blob and no worker wrapping. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; img-src * blob: data:; connect-src * blob: ipc:; media-src * blob: data:; child-src * blob: data:; worker-src 'self' blob:; frame-src * blob: data:"><title>webrtc e2e</title></head>
+<body><pre id="log">starting</pre>
+<script src="scenarios.js"></script>
+<script>
+  const log = (s) => { document.getElementById('log').textContent += '\n' + s; };
+  connectHarness('webkit', window.__E2E_WS__, log);
+</script></body></html>

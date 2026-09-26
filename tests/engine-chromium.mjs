@@ -1,4 +1,4 @@
-// Interop: GStreamer webrtcbin engine (stdio_peer) <-> headless Chromium.
+// Interop: the native engine (stdio_peer, str0m) <-> headless Chromium.
 // Usage: node engine-chromium.mjs [--mdns]
 import { chromium } from 'playwright-core';
 import { spawn } from 'node:child_process';
@@ -142,7 +142,7 @@ await run('engine-offers', 'offerer', async () => {
   toEngine({ op: 'ready' });
   const r = await got;
   pc.close();
-  return { ok: r.label === 'engine' && r.msgs[0] === 'hello from webrtcbin' && r.msgs[1] === 'ack', ...r };
+  return { ok: r.label === 'engine' && r.msgs[0] === 'hello from engine' && r.msgs[1] === 'ack', ...r };
 });
 
 await browser.close();

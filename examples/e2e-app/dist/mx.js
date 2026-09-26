@@ -122,6 +122,7 @@ async function roleMatrixCall(o) {
   const out = { role: o.role, supportsVoip: null, states: [] };
   const client = await mxClient(o);
   mxClients.push(client);
+  const t0 = performance.now();
   out.supportsVoip = client.supportsVoip();
   let call;
   if (o.role === 'caller') {
@@ -145,6 +146,10 @@ async function roleMatrixCall(o) {
   await sleep(1500);
   const [heard, seen] = await Promise.all([mxAnalyse(um.stream), mxWatch(um.stream)]);
   out.usermedia = { heard, seen, streamIdFromMetadata: !!um.stream.id };
+  out.audioSenders = [];
+  try { (await call.peerConn.getStats()).forEach((r) => { if (r.type === 'outbound-rtp' && r.kind === 'audio') out.audioSenders.push({ mid: r.mid, framesSent: r.framesSent, packetsSent: r.packetsSent }); }); } catch {}
+  out.audioTransceivers = call.peerConn.getTransceivers().filter((t) => t.sender.track && t.sender.track.kind === 'audio').length;
+  out.elapsedMs = Math.round(performance.now() - t0);
   out.audioOk = !!heard.peakHz && Math.abs(heard.peakHz - o.expectFreq) < 25 && heard.rmsMax > 0.1; // synthetic tracks get no capture processing
   out.videoOk = seen.width > 0 && seen.fps > 5 && near(seen.marker, o.expectMarker);
   // Caller starts screen sharing: a renegotiation adding a second video

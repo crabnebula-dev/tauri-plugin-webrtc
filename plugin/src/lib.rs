@@ -2,7 +2,7 @@
 //!
 //! Injects a W3C-shaped `RTCPeerConnection` / `RTCDataChannel` shim that is
 //! installed only when the webview has no native implementation, and backs it
-//! with a native engine (GStreamer `webrtcbin` by default).
+//! with a pure Rust engine (str0m-based, see `tauri-webrtc-engine`).
 //!
 //! ```ignore
 //! tauri::Builder::default().plugin(tauri_plugin_webrtc::init())
@@ -380,7 +380,7 @@ impl Builder {
 
 #[cfg(target_os = "linux")]
 fn default_engine() -> std::result::Result<Arc<dyn PeerEngine>, String> {
-    tauri_webrtc_engine::gst::GstEngine::new()
+    tauri_webrtc_engine::native::NativeEngine::new()
         .map(|e| Arc::new(e) as Arc<dyn PeerEngine>)
         .map_err(|e| e.to_string())
 }

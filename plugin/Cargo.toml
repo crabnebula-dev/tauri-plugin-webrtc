@@ -1,6 +1,6 @@
 [package]
 name = "tauri-plugin-webrtc"
-description = "WebRTC for Tauri on Linux via a standards-shaped JS shim over a native engine"
+description = "WebRTC for Tauri on Linux via a standards-shaped JS shim over a pure Rust engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,14 +9,11 @@ links = "tauri-plugin-webrtc"
 
 [dependencies]
 tauri = { version = "2" }
-tauri-webrtc-engine = { path = "../crates/engine", default-features = false }
+tauri-webrtc-engine = { path = "../crates/engine" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 log.workspace = true
-
-[target.'cfg(target_os = "linux")'.dependencies]
-tauri-webrtc-engine = { path = "../crates/engine", features = ["gst"] }
 
 [build-dependencies]
 tauri-plugin = { version = "2", features = ["build"] }

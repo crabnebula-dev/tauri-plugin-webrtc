@@ -9,18 +9,23 @@ import path from 'node:path';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const bin = path.join(root, 'target/debug/examples/stdio_peer');
 const mdns = process.argv.includes('--mdns');
+const argVal = (k) => (process.argv.includes(k) ? process.argv[process.argv.indexOf(k) + 1] : null);
+const engineConfig = argVal('--engine-config');
+const browserConfig = JSON.parse(argVal('--browser-config') || '{}');
 const exe = process.env.CHROMIUM || '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
 
 function startPeer(role) {
-  const child = spawn(bin, [role], { stdio: ['pipe', 'pipe', 'inherit'] });
+  const child = spawn(bin, [role], { stdio: ['pipe', 'pipe', 'inherit'], env: { ...process.env, ...(engineConfig ? { WEBRTC_CONFIG: engineConfig } : {}) } });
   const listeners = new Set();
+  const early = []; // lines printed before anyone listens (fast engines emit the offer at once)
   createInterface({ input: child.stdout }).on('line', (l) => {
     let m; try { m = JSON.parse(l); } catch { return; }
+    if (!listeners.size) early.push(m);
     for (const f of listeners) f(m);
   });
   return {
     send: (m) => child.stdin.write(JSON.stringify(m) + '\n'),
-    on: (f) => listeners.add(f),
+    on: (f) => { listeners.add(f); early.splice(0).forEach(f); },
     stop: () => child.kill(),
   };
 }
@@ -33,6 +38,7 @@ const results = {};
 async function run(name, role, pageFn) {
   const peer = startPeer(role);
   const page = await browser.newPage();
+  await page.addInitScript((c) => { window.__PC_CONFIG = c; }, browserConfig);
   page.on('console', (m) => { if (m.type() === 'error') console.log(`[${name}] console:`, m.text()); });
   let ready = false; const backlog = [];
   const deliver = (m) => page.evaluate((mm) => window.fromEngine && window.fromEngine(mm), m).catch(() => {});
@@ -59,7 +65,7 @@ async function run(name, role, pageFn) {
 
 // Browser offers, engine answers and echoes.
 await run('browser-offers', 'answerer', async () => {
-  const pc = new RTCPeerConnection();
+  const pc = new RTCPeerConnection(window.__PC_CONFIG);
   const queue = [];
   window.fromEngine = async (m) => {
     if (m.op === 'answer') { await pc.setRemoteDescription({ type: 'answer', sdp: m.sdp }); for (const c of queue.splice(0)) await pc.addIceCandidate(c); }
@@ -114,7 +120,7 @@ await run('browser-offers', 'answerer', async () => {
 
 // Engine offers with its own channel; browser answers.
 await run('engine-offers', 'offerer', async () => {
-  const pc = new RTCPeerConnection();
+  const pc = new RTCPeerConnection(window.__PC_CONFIG);
   const queue = [];
   pc.onicecandidate = (e) => { if (e.candidate) toEngine({ op: 'candidate', candidate: e.candidate.toJSON() }); };
   const got = new Promise((resolve) => {
@@ -140,5 +146,5 @@ await run('engine-offers', 'offerer', async () => {
 });
 
 await browser.close();
-console.log(JSON.stringify({ mdns, results }, null, 2));
+console.log(JSON.stringify({ mdns, engineConfig, browserConfig, results }, null, 2));
 process.exit(Object.values(results).every((r) => r.ok) ? 0 : 1);

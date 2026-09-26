@@ -1,0 +1,396 @@
+//! WebRTC for Tauri webviews that lack it (WebKitGTK on Linux).
+//!
+//! Injects a W3C-shaped `RTCPeerConnection` / `RTCDataChannel` shim that is
+//! installed only when the webview has no native implementation, and backs it
+//! with a native engine (GStreamer `webrtcbin` by default).
+//!
+//! ```ignore
+//! tauri::Builder::default().plugin(tauri_plugin_webrtc::init())
+//! ```
+
+use serde::Serialize;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use tauri::ipc::{Channel, InvokeBody, InvokeResponseBody, Request};
+use tauri::plugin::{Builder as PluginBuilder, TauriPlugin};
+use tauri::webview::PageLoadEvent;
+use tauri::{Manager, Runtime, State, Webview};
+use tauri_webrtc_engine::*;
+
+const SHIM: &str = include_str!("../guest-js/shim.js");
+
+/// Error returned to the shim, which rethrows it as a `DOMException`.
+#[derive(Debug, Serialize)]
+pub struct DomError {
+    name: &'static str,
+    message: String,
+}
+
+impl From<Error> for DomError {
+    fn from(e: Error) -> Self {
+        DomError { name: e.dom_name(), message: e.to_string() }
+    }
+}
+
+fn dom(name: &'static str, message: impl Into<String>) -> DomError {
+    DomError { name, message: message.into() }
+}
+
+type CmdResult<T> = std::result::Result<T, DomError>;
+
+struct Entry {
+    peer: Arc<dyn Peer>,
+    webview: String,
+}
+
+/// Plugin state: the engine and every live peer connection.
+pub struct WebrtcState {
+    engine: std::result::Result<Arc<dyn PeerEngine>, String>,
+    peers: Mutex<HashMap<u32, Entry>>,
+    next_id: AtomicU32,
+    max_peers_per_webview: usize,
+}
+
+impl WebrtcState {
+    fn peer(&self, webview: &str, id: u32) -> CmdResult<Arc<dyn Peer>> {
+        let peers = self.peers.lock().unwrap();
+        match peers.get(&id) {
+            Some(e) if e.webview == webview => Ok(e.peer.clone()),
+            _ => Err(dom("InvalidStateError", format!("unknown peer connection {id}"))),
+        }
+    }
+
+    /// Close every peer connection owned by a webview (navigation, reload, destroy).
+    fn close_webview(&self, webview: &str) {
+        let closing: Vec<Arc<dyn Peer>> = {
+            let mut peers = self.peers.lock().unwrap();
+            let ids: Vec<u32> = peers.iter().filter(|(_, e)| e.webview == webview).map(|(id, _)| *id).collect();
+            ids.into_iter().filter_map(|id| peers.remove(&id)).map(|e| e.peer).collect()
+        };
+        if !closing.is_empty() {
+            log::debug!("closing {} peer connection(s) for webview {webview}", closing.len());
+            std::thread::spawn(move || closing.iter().for_each(|p| p.close()));
+        }
+    }
+}
+
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> CmdResult<T> {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| dom("OperationError", e.to_string()))?
+        .map_err(DomError::from)
+}
+
+/// Wire format for data channel messages on the peer's channel:
+/// `[u32 LE handle][u8 kind: 0 text, 1 binary][payload]`.
+fn frame(handle: DcHandle, payload: Payload) -> Vec<u8> {
+    let (kind, bytes) = match payload {
+        Payload::Text(s) => (0u8, s.into_bytes()),
+        Payload::Binary(b) => (1u8, b),
+    };
+    let mut buf = Vec::with_capacity(5 + bytes.len());
+    buf.extend_from_slice(&handle.to_le_bytes());
+    buf.push(kind);
+    buf.extend_from_slice(&bytes);
+    buf
+}
+
+#[tauri::command]
+async fn pc_create<R: Runtime>(
+    webview: Webview<R>,
+    state: State<'_, WebrtcState>,
+    config: RtcConfiguration,
+    channel: Channel<InvokeResponseBody>,
+) -> CmdResult<u32> {
+    let engine = state.engine.clone().map_err(|e| dom("NotSupportedError", e))?;
+    let label = webview.label().to_string();
+    {
+        let peers = state.peers.lock().unwrap();
+        if peers.values().filter(|e| e.webview == label).count() >= state.max_peers_per_webview {
+            return Err(dom("OperationError", "too many peer connections for this webview"));
+        }
+    }
+    // One ordered channel carries both JSON events and raw message frames,
+    // so a data channel's `open` can never overtake its first message.
+    let sink: EventSink = Arc::new(move |e: PeerEvent| {
+        let body = match e {
+            PeerEvent::DcMessage { handle, payload } => InvokeResponseBody::Raw(frame(handle, payload)),
+            other => match serde_json::to_string(&other) {
+                Ok(s) => InvokeResponseBody::Json(s),
+                Err(err) => {
+                    log::warn!("event serialise: {err}");
+                    return;
+                }
+            },
+        };
+        let _ = channel.send(body);
+    });
+    let peer: Arc<dyn Peer> = blocking(move || engine.create_peer(&config, sink).map(Arc::from)).await?;
+    let id = state.next_id.fetch_add(1, Ordering::Relaxed);
+    state.peers.lock().unwrap().insert(id, Entry { peer, webview: label });
+    Ok(id)
+}
+
+#[tauri::command]
+async fn pc_create_offer<R: Runtime>(webview: Webview<R>, state: State<'_, WebrtcState>, id: u32) -> CmdResult<SessionDescription> {
+    let p = state.peer(webview.label(), id)?;
+    blocking(move || p.create_offer()).await
+}
+
+#[tauri::command]
+async fn pc_create_answer<R: Runtime>(webview: Webview<R>, state: State<'_, WebrtcState>, id: u32) -> CmdResult<SessionDescription> {
+    let p = state.peer(webview.label(), id)?;
+    blocking(move || p.create_answer()).await
+}
+
+#[tauri::command]
+async fn pc_set_local<R: Runtime>(webview: Webview<R>, state: State<'_, WebrtcState>, id: u32, desc: SessionDescription) -> CmdResult<()> {
+    let p = state.peer(webview.label(), id)?;
+    blocking(move || p.set_local_description(&desc)).await
+}
+
+#[tauri::command]
+async fn pc_set_remote<R: Runtime>(webview: Webview<R>, state: State<'_, WebrtcState>, id: u32, desc: SessionDescription) -> CmdResult<()> {
+    let p = state.peer(webview.label(), id)?;
+    blocking(move || p.set_remote_description(&desc)).await
+}
+
+#[tauri::command]
+async fn pc_add_ice<R: Runtime>(webview: Webview<R>, state: State<'_, WebrtcState>, id: u32, candidate: IceCandidate) -> CmdResult<()> {
+    let p = state.peer(webview.label(), id)?;
+    blocking(move || p.add_ice_candidate(&candidate)).await
+}
+
+#[tauri::command]
+async fn pc_get_stats<R: Runtime>(webview: Webview<R>, state: State<'_, WebrtcState>, id: u32) -> CmdResult<serde_json::Value> {
+    let p = state.peer(webview.label(), id)?;
+    blocking(move || p.stats()).await
+}
+
+#[tauri::command]
+async fn pc_close<R: Runtime>(webview: Webview<R>, state: State<'_, WebrtcState>, id: u32) -> CmdResult<()> {
+    let removed = {
+        let mut peers = state.peers.lock().unwrap();
+        match peers.get(&id) {
+            Some(e) if e.webview == webview.label() => peers.remove(&id),
+            _ => None,
+        }
+    };
+    if let Some(e) = removed {
+        blocking(move || {
+            e.peer.close();
+            Ok(())
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn dc_create<R: Runtime>(
+    webview: Webview<R>,
+    state: State<'_, WebrtcState>,
+    id: u32,
+    label: String,
+    init: DataChannelInit,
+) -> CmdResult<DataChannelInfo> {
+    let p = state.peer(webview.label(), id)?;
+    blocking(move || p.create_data_channel(&label, &init)).await
+}
+
+fn header<T: std::str::FromStr>(req: &Request<'_>, name: &str) -> CmdResult<T> {
+    req.headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| dom("TypeError", format!("missing or invalid header {name}")))
+}
+
+/// Parse a batch of outgoing messages: repeated `[u8 kind][u32 LE len][bytes]`.
+fn parse_batch(mut body: &[u8]) -> CmdResult<Vec<Payload>> {
+    let mut out = Vec::new();
+    while !body.is_empty() {
+        if body.len() < 5 {
+            return Err(dom("TypeError", "truncated dc_send batch"));
+        }
+        let kind = body[0];
+        let len = u32::from_le_bytes([body[1], body[2], body[3], body[4]]) as usize;
+        let rest = &body[5..];
+        if rest.len() < len {
+            return Err(dom("TypeError", "truncated dc_send record"));
+        }
+        let bytes = rest[..len].to_vec();
+        out.push(match kind {
+            0 => Payload::Text(String::from_utf8(bytes).map_err(|_| dom("TypeError", "text payload is not UTF-8"))?),
+            _ => Payload::Binary(bytes),
+        });
+        body = &rest[len..];
+    }
+    Ok(out)
+}
+
+/// Send a batch of messages on one data channel, in order.
+///
+/// Raw body: see [`parse_batch`]. Headers: `x-pc`, `x-dc`. The shim keeps
+/// one call in flight per channel and batches behind it, because concurrent
+/// IPC calls are not guaranteed to complete in order.
+#[tauri::command]
+async fn dc_send<R: Runtime>(webview: Webview<R>, state: State<'_, WebrtcState>, request: Request<'_>) -> CmdResult<u64> {
+    let id: u32 = header(&request, "x-pc")?;
+    let handle: DcHandle = header(&request, "x-dc")?;
+    let InvokeBody::Raw(body) = request.body() else {
+        return Err(dom("TypeError", "dc_send expects a raw body"));
+    };
+    let batch = parse_batch(body)?;
+    let p = state.peer(webview.label(), id)?;
+    // webrtcbin's send only queues; no need for the blocking pool.
+    for payload in batch {
+        p.dc_send(handle, payload)?;
+    }
+    // Report the engine-side buffer so the shim can keep bufferedAmount honest.
+    p.dc_buffered_amount(handle).map_err(DomError::from)
+}
+
+#[tauri::command]
+async fn dc_close<R: Runtime>(webview: Webview<R>, state: State<'_, WebrtcState>, id: u32, handle: DcHandle) -> CmdResult<()> {
+    state.peer(webview.label(), id)?.dc_close(handle).map_err(DomError::from)
+}
+
+#[tauri::command]
+async fn dc_buffered_amount<R: Runtime>(webview: Webview<R>, state: State<'_, WebrtcState>, id: u32, handle: DcHandle) -> CmdResult<u64> {
+    state.peer(webview.label(), id)?.dc_buffered_amount(handle).map_err(DomError::from)
+}
+
+#[tauri::command]
+async fn dc_set_threshold<R: Runtime>(
+    webview: Webview<R>,
+    state: State<'_, WebrtcState>,
+    id: u32,
+    handle: DcHandle,
+    threshold: u64,
+) -> CmdResult<()> {
+    state
+        .peer(webview.label(), id)?
+        .dc_set_buffered_amount_low_threshold(handle, threshold)
+        .map_err(DomError::from)
+}
+
+/// Plugin configuration.
+pub struct Builder {
+    force_shim: bool,
+    max_peers_per_webview: usize,
+    engine: Option<Arc<dyn PeerEngine>>,
+}
+
+impl Default for Builder {
+    fn default() -> Self {
+        Self { force_shim: false, max_peers_per_webview: 16, engine: None }
+    }
+}
+
+impl Builder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Install the shim even when the webview has a native `RTCPeerConnection`.
+    /// For testing the shim on webviews that already support WebRTC.
+    pub fn force_shim(mut self, force: bool) -> Self {
+        self.force_shim = force;
+        self
+    }
+
+    /// Cap on concurrent peer connections per webview. Default 16.
+    pub fn max_peers_per_webview(mut self, n: usize) -> Self {
+        self.max_peers_per_webview = n;
+        self
+    }
+
+    /// Use a different engine than the default GStreamer one.
+    pub fn engine(mut self, engine: Arc<dyn PeerEngine>) -> Self {
+        self.engine = Some(engine);
+        self
+    }
+
+    pub fn build<R: Runtime>(self) -> TauriPlugin<R> {
+        let engine: std::result::Result<Arc<dyn PeerEngine>, String> = match self.engine {
+            Some(e) => Ok(e),
+            None => default_engine(),
+        };
+        if let Err(e) = &engine {
+            log::warn!("tauri-plugin-webrtc: engine unavailable, shim disabled: {e}");
+        }
+        let info = serde_json::json!({
+            "available": engine.is_ok(),
+            "engine": engine.as_ref().map(|e| e.name()).ok(),
+            "error": engine.as_ref().err(),
+            "force": self.force_shim,
+        });
+        let script = format!("window.__TAURI_WEBRTC__ = {info};\n{SHIM}");
+        let max = self.max_peers_per_webview;
+        let engine = Mutex::new(Some(engine));
+
+        PluginBuilder::new("webrtc")
+            .js_init_script(script)
+            .invoke_handler(tauri::generate_handler![
+                pc_create,
+                pc_create_offer,
+                pc_create_answer,
+                pc_set_local,
+                pc_set_remote,
+                pc_add_ice,
+                pc_get_stats,
+                pc_close,
+                dc_create,
+                dc_send,
+                dc_close,
+                dc_buffered_amount,
+                dc_set_threshold,
+            ])
+            .setup(move |app, _api| {
+                let engine = engine.lock().unwrap().take().expect("setup runs once");
+                app.manage(WebrtcState {
+                    engine,
+                    peers: Mutex::new(HashMap::new()),
+                    next_id: AtomicU32::new(1),
+                    max_peers_per_webview: max,
+                });
+                Ok(())
+            })
+            .on_page_load(|webview, payload| {
+                if payload.event() == PageLoadEvent::Started {
+                    webview.state::<WebrtcState>().close_webview(webview.label());
+                }
+            })
+            .on_event(|app, event| {
+                // A destroyed window takes its webview (same label) with it.
+                if let tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::Destroyed, .. } = event {
+                    app.state::<WebrtcState>().close_webview(label);
+                }
+            })
+            .on_drop(|app| {
+                let state = app.state::<WebrtcState>();
+                let all: Vec<Arc<dyn Peer>> = state.peers.lock().unwrap().drain().map(|(_, e)| e.peer).collect();
+                all.iter().for_each(|p| p.close());
+            })
+            .build()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn default_engine() -> std::result::Result<Arc<dyn PeerEngine>, String> {
+    tauri_webrtc_engine::gst::GstEngine::new()
+        .map(|e| Arc::new(e) as Arc<dyn PeerEngine>)
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn default_engine() -> std::result::Result<Arc<dyn PeerEngine>, String> {
+    Err("no default engine on this platform; the webview has native WebRTC".into())
+}
+
+/// Plugin with default settings.
+pub fn init<R: Runtime>() -> TauriPlugin<R> {
+    Builder::default().build()
+}

@@ -1,0 +1,15 @@
+[package]
+name = "e2e-app"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+tauri = { version = "2" }
+tauri-plugin-webrtc = { path = "../../plugin" }
+serde_json.workspace = true
+env_logger = "0.11"
+
+[build-dependencies]
+tauri-build = { version = "2" }

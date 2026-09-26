@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/engine", "plugin", "examples/e2e-app"]
+# Vendored crates are path dependencies, not members: keep their default
+# features (aws-lc-rs) out of the workspace resolve and the SBOMs.
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"

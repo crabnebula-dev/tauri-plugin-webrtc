@@ -131,9 +131,7 @@ async function roleLivekit(opts) {
   await room.disconnect();
   tone.stop(); cam.stop();
   const d = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
-  // Level is only a presence check: AEC3 attenuates the near-end tone while the
-  // far-end tone plays (permanent double talk), so the level varies run to run.
-  out.audioOk = !!heard.peakHz && Math.abs(heard.peakHz - expectFreq) < 25 && heard.rmsMax > 0.01;
+  out.audioOk = !!heard.peakHz && Math.abs(heard.peakHz - expectFreq) < 25 && heard.rmsMax > 0.1; // synthetic tracks get no capture processing
   out.videoOk = seen.width > 0 && seen.fps > 5 && d(seen.marker, expectMarker) < 60;
   out.ok = out.audioOk && out.videoOk && out.errors.length === 0;
   // Through the shim, E2EE must actually run our transforms both ways.

@@ -145,7 +145,7 @@ async function roleMatrixCall(o) {
   await sleep(1500);
   const [heard, seen] = await Promise.all([mxAnalyse(um.stream), mxWatch(um.stream)]);
   out.usermedia = { heard, seen, streamIdFromMetadata: !!um.stream.id };
-  out.audioOk = !!heard.peakHz && Math.abs(heard.peakHz - o.expectFreq) < 25 && heard.rmsMax > 0.01;
+  out.audioOk = !!heard.peakHz && Math.abs(heard.peakHz - o.expectFreq) < 25 && heard.rmsMax > 0.1; // synthetic tracks get no capture processing
   out.videoOk = seen.width > 0 && seen.fps > 5 && near(seen.marker, o.expectMarker);
   // Caller starts screen sharing: a renegotiation adding a second video
   // transceiver, announced through sdp_stream_metadata.

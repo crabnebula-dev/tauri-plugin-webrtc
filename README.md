@@ -67,8 +67,13 @@ driven by tokio, with:
   (pure Rust port of the WebRTC audio processing module);
 - our own STUN/TURN client, mDNS resolver and JSEP layer.
 
-`vendor/str0m` is str0m 0.24.0 with two small patches (VP8 PictureID for SFUs,
-JSEP re-offers). See `vendor/str0m/PATCHES.md`. Minimum Rust: 1.91.
+`vendor/str0m` is str0m 0.24.0 with small patches (VP8 PictureID for SFUs, JSEP
+re-offers), and `vendor/str0m-rust-crypto` builds the DTLS certificate with
+RustCrypto, so no C crypto library (AWS-LC) is compiled in. The engine's
+dependency tree has no `-sys` crates. See `vendor/str0m/PATCHES.md`. Minimum
+Rust: 1.91.
+
+`sbom/` holds CycloneDX SBOMs of the engine and the plugin (`cargo cyclonedx`).
 
 ## Layout
 
@@ -76,7 +81,8 @@ JSEP re-offers). See `vendor/str0m/PATCHES.md`. Minimum Rust: 1.91.
 - `plugin`: Tauri plugin, commands, and `guest-js/shim.js`.
 - `examples/e2e-app`: Tauri app used by the end-to-end tests.
 - `tests`: Node harnesses (Playwright with Chromium as the other peer).
-- `vendor/str0m`: patched str0m.
+- `vendor/str0m`, `vendor/str0m-rust-crypto`: patched str0m.
+- `sbom`: CycloneDX SBOMs.
 
 ## Test
 

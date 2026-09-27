@@ -138,3 +138,12 @@ at it, and add `--tchap` for the LiveKit and Matrix tests.
 
 The LiveKit test needs a `livekit-server` binary. The Matrix test runs Synapse as
 a fixture; `SYNAPSE_PY` points at a Python with `matrix-synapse` installed.
+
+## Licence and compliance
+
+Licensed under either of Apache License 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+or MIT ([LICENSE-MIT](LICENSE-MIT)), at your option.
+
+CrabNebula stewards tauri-plugin-webrtc as free and open-source software. See
+[COMPLIANCE.md](COMPLIANCE.md) for its status under the Cyber Resilience Act.
+The engine, [qrtc](https://github.com/crabnebula-dev/qrtc), has its own statement.

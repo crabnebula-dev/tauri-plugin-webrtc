@@ -37,6 +37,7 @@ permissions = [
   "allow-pc-upsert-transceiver",
   "allow-pc-request-keyframe",
   "allow-pc-set-transform",
+  "allow-pc-insert-dtmf",
   "allow-pc-audio-processing",
   "allow-media-push",
   "allow-audio-push",

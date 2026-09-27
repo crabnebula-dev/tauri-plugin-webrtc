@@ -289,7 +289,7 @@
       this.sender = sender; this.track = null; this.video = null; this.encoder = null;
       this.w = 0; this.h = 0; this.forceKey = true; this.lastFrameAt = 0; this.stopped = false;
       this.bitrate = 1_000_000; this.maxBitrate = null; this.scale = 1; this.active = true;
-      this.framesEncoded = 0; this.keyFramesEncoded = 0;
+      this.framesEncoded = 0; this.keyFramesEncoded = 0; this.codec = 'vp8';
       this.pusher = new FramePusher(sender._tx._pc, sender._tx._id);
       this.pusher.onBacklog = () => { this.forceKey = true; };
     }
@@ -328,12 +328,19 @@
         output: (chunk) => {
           const data = new Uint8Array(chunk.byteLength); chunk.copyTo(data);
           const key = chunk.type === 'key'; this.framesEncoded++; if (key) this.keyFramesEncoded++;
-          this.sender._out({ data, key, ts: chunk.timestamp, codec: CODEC.vp8, video: true, width: this.w, height: this.h });
+          this.sender._out({ data, key, ts: chunk.timestamp, codec: CODEC[this.codec], video: true, width: this.w, height: this.h });
         },
         error: (e) => { console.warn('[tauri-webrtc] video encoder', e); this.encoder = null; },
       });
       const bitrate = Math.max(50_000, Math.min(this.bitrate, this.maxBitrate || Infinity));
-      this.encoder.configure({ codec: 'vp8', width: this.w, height: this.h, bitrate, framerate: this.fps || MAX_FPS, latencyMode: 'realtime' });
+      const common = { width: this.w, height: this.h, bitrate, framerate: this.fps || MAX_FPS, latencyMode: 'realtime' };
+      if (this.codec === 'h264') {
+        // Constrained baseline, Annex B (what RTP carries). Level 3.1 up to 720p, 4.0 above.
+        const level = this.w * this.h > 1280 * 720 ? '28' : '1f';
+        this.encoder.configure({ ...common, codec: `avc1.42e0${level}`, avc: { format: 'annexb' } });
+      } else {
+        this.encoder.configure({ ...common, codec: 'vp8' });
+      }
       this.srcW = w; this.srcH = h; this.forceKey = true;
     }
     _tick() {
@@ -342,6 +349,8 @@
       try {
         const now = performance.now();
         if (t && t.readyState === 'live' && this.active && v.videoWidth && now - this.lastFrameAt >= 1000 / (this.fps || MAX_FPS) - 2) {
+          const want = negotiatedVideoCodec(this.sender._tx._pc, this.sender._tx._mid);
+          if (want !== this.codec) { this.codec = want; this.srcW = 0; }
           if (!this.encoder || v.videoWidth !== this.srcW || v.videoHeight !== this.srcH) this._configure(v.videoWidth, v.videoHeight);
           if (this.encoder && this.encoder.encodeQueueSize < 3) {
             this.lastFrameAt = now;
@@ -375,7 +384,7 @@
       if (this.encoder) this._configure(this.srcW, this.srcH);
     }
     stop() { this.stopped = true; if (this.encoder && this.encoder.state !== 'closed') this.encoder.close(); if (this.video) { this.video.srcObject = null; this.video.remove(); } }
-    stats() { return { framesEncoded: this.framesEncoded, keyFramesEncoded: this.keyFramesEncoded, framesSent: this.pusher.sent, bytesSent: this.pusher.bytes, frameWidth: this.w, frameHeight: this.h, targetBitrate: this.bitrate, framesDropped: this.pusher.dropped, ipcMsPerCall: this.pusher.calls ? +(this.pusher.ipcMs / this.pusher.calls).toFixed(2) : null }; }
+    stats() { return { mimeType: this.codec === 'h264' ? 'video/H264' : 'video/VP8', framesEncoded: this.framesEncoded, keyFramesEncoded: this.keyFramesEncoded, framesSent: this.pusher.sent, bytesSent: this.pusher.bytes, frameWidth: this.w, frameHeight: this.h, targetBitrate: this.bitrate, framesDropped: this.pusher.dropped, ipcMsPerCall: this.pusher.calls ? +(this.pusher.ipcMs / this.pusher.calls).toFixed(2) : null }; }
   }
 
   class VideoRecvPipe {
@@ -387,8 +396,10 @@
       this.decoder = null; this.needKey = true; this.framesReceived = 0; this.framesDecoded = 0; this.bytes = 0; this.keyFramesDecoded = 0;
       this.lastKeyReq = 0;
     }
-    _decoder() {
-      if (this.decoder && this.decoder.state === 'configured') return this.decoder;
+    _decoder(codec) {
+      if (this.decoder && this.decoder.state === 'configured' && this.decCodec === codec) return this.decoder;
+      if (this.decoder && this.decoder.state !== 'closed') this.decoder.close();
+      this.decCodec = codec;
       this.decoder = new VideoDecoder({
         output: (f) => {
           if (this.canvas.width !== f.displayWidth || this.canvas.height !== f.displayHeight) {
@@ -398,7 +409,8 @@
         },
         error: (e) => { console.warn('[tauri-webrtc] video decoder', e); this.needKey = true; this._askKey(); },
       });
-      this.decoder.configure({ codec: 'vp8', optimizeForLatency: true });
+      // H.264 arrives in Annex B (SPS/PPS in-band), so no description is needed.
+      this.decoder.configure({ codec: codec === CODEC.h264 ? 'avc1.42e01f' : 'vp8', optimizeForLatency: true });
       return this.decoder;
     }
     _askKey() {
@@ -412,14 +424,15 @@
       this._decode(codec, key, ts, data);
     }
     _decode(codec, key, ts, data) {
-      if (codec !== CODEC.vp8) return;
+      if (codec !== CODEC.vp8 && codec !== CODEC.h264) return;
+      if (codec !== this.decCodec) this.needKey = true; // new codec: start at a keyframe
       if (this.needKey && !key) { this._askKey(); return; }
       this.needKey = false; if (key) this.keyFramesDecoded++;
-      try { this._decoder().decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: ts, data })); }
+      try { this._decoder(codec).decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: ts, data })); }
       catch (e) { this.needKey = true; this.decoder = null; this._askKey(); }
     }
     stop() { if (this.decoder && this.decoder.state !== 'closed') this.decoder.close(); this.track.stop(); }
-    stats() { return { framesReceived: this.framesReceived, framesDecoded: this.framesDecoded, keyFramesDecoded: this.keyFramesDecoded, bytesReceived: this.bytes, frameWidth: this.canvas.width, frameHeight: this.canvas.height }; }
+    stats() { return { mimeType: this.decCodec === CODEC.h264 ? 'video/H264' : this.decCodec === CODEC.vp8 ? 'video/VP8' : undefined, framesReceived: this.framesReceived, framesDecoded: this.framesDecoded, keyFramesDecoded: this.keyFramesDecoded, bytesReceived: this.bytes, frameWidth: this.canvas.width, frameHeight: this.canvas.height }; }
   }
 
   // Audio: the page does device I/O through AudioWorklets; the engine runs
@@ -775,7 +788,7 @@
       const rtpTimestamp = Math.floor((meta.ts * clock) / 1000) % 0x100000000;
       const metadata = {
         synchronizationSource: meta.ssrc, payloadType: meta.pt, contributingSources: [], rtpTimestamp,
-        mimeType: meta.video ? 'video/VP8' : 'audio/opus',
+        mimeType: meta.video ? (meta.codec === CODEC.h264 ? 'video/H264' : 'video/VP8') : 'audio/opus',
       };
       if (meta.video) Object.assign(metadata, { frameId: tag, dependencies: [], width: meta.width || 0, height: meta.height || 0, spatialIndex: 0, temporalIndex: 0 });
       this._port.postMessage({ tag, video: meta.video, type: meta.video ? (meta.key ? 'key' : 'delta') : undefined, timestamp: rtpTimestamp, data, metadata }, [data]);
@@ -785,13 +798,101 @@
   const nextSsrc = () => (transformSsrc = (transformSsrc * 1103515245 + 12345) >>> 0) || 1;
 
   const AUDIO_CAPS = { codecs: [{ mimeType: 'audio/opus', clockRate: 48000, channels: 2, sdpFmtpLine: 'minptime=10;useinbandfec=1' }], headerExtensions: [] };
-  const VIDEO_CAPS = { codecs: [{ mimeType: 'video/VP8', clockRate: 90000 }, { mimeType: 'video/rtx', clockRate: 90000 }], headerExtensions: [] };
-  const capabilities = (kind) => (kind === 'audio' ? structuredClone(AUDIO_CAPS) : kind === 'video' ? structuredClone(VIDEO_CAPS) : null);
+  // H.264 goes through WebCodecs, which in WebKitGTK depends on the GStreamer
+  // plugins installed (openh264, x264, a hardware encoder). Probe once; offer
+  // H.264 only when both encode and decode work. Profiles match the engine's.
+  const H264_PROFILES = ['42e01f', '42001f', '4d001f', '64001f'];
+  const h264Fmtp = (p) => `level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=${p}`;
+  const videoCodecs = ['vp8'];
+  const videoProbe = (async () => {
+    try {
+      if (typeof VideoEncoder === 'undefined' || typeof VideoDecoder === 'undefined' || info.h264 === false) return;
+      const enc = await VideoEncoder.isConfigSupported({ codec: 'avc1.42e01f', width: 640, height: 360, bitrate: 1_000_000, framerate: 30, latencyMode: 'realtime', avc: { format: 'annexb' } });
+      const dec = await VideoDecoder.isConfigSupported({ codec: 'avc1.42e01f' });
+      if (enc.supported && dec.supported) videoCodecs.push('h264');
+    } catch { /* VP8 only */ }
+  })();
+  const VIDEO_CAPS = () => ({
+    codecs: [
+      { mimeType: 'video/VP8', clockRate: 90000 },
+      ...(videoCodecs.includes('h264') ? H264_PROFILES.map((p) => ({ mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: h264Fmtp(p) })) : []),
+      { mimeType: 'video/rtx', clockRate: 90000 },
+    ],
+    headerExtensions: [],
+  });
+  const capabilities = (kind) => (kind === 'audio' ? structuredClone(AUDIO_CAPS) : kind === 'video' ? VIDEO_CAPS() : null);
+
+  // The codec this transceiver sends: the answerer's first video codec we can
+  // encode on the m-line (JSEP: the answer's order decides).
+  function negotiatedVideoCodec(pc, mid) {
+    const answer = [pc._currentLocal, pc._currentRemote].find((d) => d && d.type === 'answer');
+    if (!answer || mid == null) return 'vp8';
+    const sec = answer.sdp.split(/\r?\nm=/).map((x) => x.split(/\r?\n/)).find((lines) => lines.includes(`a=mid:${mid}`));
+    if (!sec) return 'vp8';
+    const names = {};
+    for (const l of sec) { const m = /^a=rtpmap:(\d+) ([^/]+)\//.exec(l); if (m) names[m[1]] = m[2].toLowerCase(); }
+    for (const pt of sec[0].split(' ').slice(3)) {
+      const n = names[pt];
+      if (n === 'vp8' || (n === 'h264' && videoCodecs.includes('h264'))) return n;
+    }
+    return 'vp8';
+  }
+
+  class RTCDTMFToneChangeEvent extends Event {
+    constructor(type, init = {}) { super(type, init); this.tone = init.tone ?? ''; }
+  }
+  const DTMF_EVENT = { 0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, '*': 10, '#': 11, A: 12, B: 13, C: 14, D: 15 };
+  // Whether the answer negotiated telephone-event on this m-line.
+  function negotiatedDtmf(pc, mid) {
+    const answer = [pc._currentLocal, pc._currentRemote].find((d) => d && d.type === 'answer');
+    if (!answer || mid == null) return false;
+    const sec = answer.sdp.split(/\r?\nm=/).map((x) => x.split(/\r?\n/)).find((lines) => lines.includes(`a=mid:${mid}`));
+    return !!sec && sec.some((l) => /^a=rtpmap:\d+ telephone-event\//i.test(l));
+  }
 
   class RTCDTMFSender extends EventTarget {
-    constructor() { super(); this.toneBuffer = ''; }
-    get canInsertDTMF() { return false; }
-    insertDTMF() { throw new DOMException('DTMF is not supported yet', 'InvalidStateError'); }
+    constructor(sender) { super(); this._sender = sender; this._buffer = ''; this._duration = 100; this._gap = 70; this._running = false; this._timer = null; }
+    get toneBuffer() { return this._buffer; }
+    get canInsertDTMF() {
+      const tx = this._sender._tx;
+      const cur = tx._currentDirection;
+      return !tx._stopping && !tx._pc._closed && !!this._sender.track && (cur === 'sendrecv' || cur === 'sendonly') && negotiatedDtmf(tx._pc, tx._mid);
+    }
+    insertDTMF(tones, duration = 100, interToneGap = 70) {
+      const tx = this._sender._tx;
+      // Steps 3-4: a stopped transceiver or a sender that cannot send DTMF.
+      if (tx._stopping) throw new DOMException('transceiver is stopped', 'InvalidStateError');
+      if (!this.canInsertDTMF) throw new DOMException('cannot insert DTMF', 'InvalidStateError');
+      tones = String(tones);
+      // Step 6: only 0-9, A-D, #, * and the pause ",".
+      if (/[^0-9A-D#*,]/i.test(tones)) throw new DOMException('invalid DTMF tone', 'InvalidCharacterError');
+      this._buffer = tones.toUpperCase();
+      this._duration = Math.min(6000, Math.max(40, Number(duration) | 0 || 100));
+      this._gap = Math.min(6000, Math.max(30, Number(interToneGap) | 0 || 70));
+      if (this._buffer === '') return; // step 10 keeps a running task, which then ends
+      if (!this._running) { this._running = true; this._timer = setTimeout(() => this._playout(), 0); }
+    }
+    // The "playout task" of the specification.
+    _playout() {
+      const tx = this._sender._tx;
+      if (tx._stopping || tx._pc._closed) { this._running = false; return; }
+      if (this._buffer === '') {
+        this._running = false;
+        this.dispatchEvent(new RTCDTMFToneChangeEvent('tonechange', { tone: '' }));
+        return;
+      }
+      const tone = this._buffer[0];
+      this._buffer = this._buffer.slice(1);
+      if (tone === ',') {
+        this._timer = setTimeout(() => this._playout(), 2000);
+      } else {
+        const duration = this._duration;
+        tx._pc._id.then((id) => invoke('pc_insert_dtmf', { id, tx: tx._id, event: DTMF_EVENT[tone], durationMs: duration })).catch(() => {});
+        this._timer = setTimeout(() => this._playout(), duration + this._gap);
+      }
+      this.dispatchEvent(new RTCDTMFToneChangeEvent('tonechange', { tone }));
+    }
+    _stop() { clearTimeout(this._timer); this._running = false; this._buffer = ''; }
   }
   defineHandlers(RTCDTMFSender.prototype, ['tonechange']);
 
@@ -799,7 +900,7 @@
     constructor(tx, track) {
       this._tx = tx; this.track = track || null; this.transport = null; this.rtcpTransport = null;
       this._everSent = !!track;
-      this.dtmf = tx.kind === 'audio' ? new RTCDTMFSender() : null;
+      this.dtmf = tx.kind === 'audio' ? new RTCDTMFSender(this) : null;
       this._params = { transactionId: '', encodings: [{ active: true }], codecs: [], headerExtensions: [], rtcp: { cname: '', reducedSize: true }, degradationPreference: 'balanced' };
       this._pipe = null;
     }
@@ -914,17 +1015,22 @@
       if (this._stopping) return;
       this._stopping = true;
       if (this.sender._pipe) this.sender._pipe.stop();
+      if (this.sender.dtmf) this.sender.dtmf._stop();
       this.sender.track = null;
       this.receiver._pipe.stop();
       this._pc._removeRemoteTrack(this);
       this._pc._syncTx(this); this._pc._updateNegotiationNeeded();
     }
     setCodecPreferences(codecs) {
-      const caps = capabilities(this.kind).codecs.map((c) => c.mimeType.toLowerCase());
+      const caps = capabilities(this.kind).codecs;
+      const same = (a, b) => String(a.mimeType).toLowerCase() === b.mimeType.toLowerCase() && (a.sdpFmtpLine || '') === (b.sdpFmtpLine || '');
       for (const c of codecs || []) {
-        if (!caps.includes(String(c.mimeType).toLowerCase())) throw new DOMException(`unsupported codec ${c.mimeType}`, 'InvalidModificationError');
+        if (!caps.some((k) => same(c, k) || (!c.sdpFmtpLine && String(c.mimeType).toLowerCase() === k.mimeType.toLowerCase()))) {
+          throw new DOMException(`unsupported codec ${c.mimeType}`, 'InvalidModificationError');
+        }
       }
-      this._codecPrefs = codecs && codecs.length ? codecs : null;
+      this._codecPrefs = codecs && codecs.length ? codecs.map((c) => ({ mimeType: String(c.mimeType), sdpFmtpLine: c.sdpFmtpLine || null })) : null;
+      this._pc._syncTx(this);
     }
     _syncTransform() {
       const send = !!this.sender._transform; const recv = !!this.receiver._transform;
@@ -934,6 +1040,7 @@
       return {
         id: this._id, kind: this.kind, direction: this._stopping ? 'stopped' : this._direction,
         streamIds: this._streamIds, senderTrackId: this._senderTrackId, fromAddTrack: this._fromAddTrack, stopped: this._stopping,
+        codecPreferences: (this._codecPrefs || []).filter((c) => !/\/(rtx|red|ulpfec|flexfec)/i.test(c.mimeType)),
       };
     }
   }
@@ -985,7 +1092,7 @@
       this._nnFired = false;
       this._pendingDataNegotiation = false;
       const channel = new OrderedChannel((m) => this._onEngine(m));
-      this._id = invoke('pc_create', { config: this._config, channel });
+      this._id = videoProbe.then(() => invoke('pc_create', { config: { ...this._config, videoCodecs: videoCodecs.slice() }, channel }));
       this._id.catch(() => {});
     }
 
@@ -1443,7 +1550,7 @@
   const expose = {
     RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, RTCDataChannel,
     RTCPeerConnectionIceEvent, RTCDataChannelEvent, RTCTrackEvent,
-    RTCRtpSender, RTCRtpReceiver, RTCRtpTransceiver, RTCDTMFSender, RTCRtpScriptTransform,
+    RTCRtpSender, RTCRtpReceiver, RTCRtpTransceiver, RTCDTMFSender, RTCDTMFToneChangeEvent, RTCRtpScriptTransform,
   };
   if (TauriWorker) expose.Worker = TauriWorker;
   for (const [name, value] of Object.entries(expose)) {

@@ -1,4 +1,6 @@
-// Interop: the native engine (stdio_peer, str0m) <-> headless Chromium.
+// Interop: the qrtc engine (its stdio_peer example) <-> headless Chromium.
+// The binary is QRTC_STDIO_PEER, or target/debug/examples/stdio_peer in a qrtc
+// checkout next to this repository (../qrtc).
 // Usage: node engine-chromium.mjs [--mdns]
 import { chromium } from 'playwright-core';
 import { spawn } from 'node:child_process';
@@ -7,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const bin = path.join(root, 'target/debug/examples/stdio_peer');
+const bin = process.env.QRTC_STDIO_PEER || path.join(root, '../qrtc/target/debug/examples/stdio_peer');
 const mdns = process.argv.includes('--mdns');
 const argVal = (k) => (process.argv.includes(k) ? process.argv[process.argv.indexOf(k) + 1] : null);
 const engineConfig = argVal('--engine-config');
@@ -30,7 +32,7 @@ function startPeer(role) {
   };
 }
 
-const args = ['--use-fake-ui-for-media-stream'];
+const args = ['--use-fake-ui-for-media-stream', ...(process.env.CHROMIUM_ARGS ? process.env.CHROMIUM_ARGS.split(' ') : [])];
 if (!mdns) args.push('--disable-features=WebRtcHideLocalIpsWithMdns');
 const browser = await chromium.launch({ executablePath: exe, args });
 const results = {};

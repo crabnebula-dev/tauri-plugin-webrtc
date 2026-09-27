@@ -28,15 +28,17 @@ WebRTC too. Cross-origin frames get nothing.
 | Area | Status |
 | --- | --- |
 | `RTCPeerConnection` JSEP | Offers, answers, renegotiation, implicit and explicit rollback (perfect negotiation), re-offers of an unchanged session, `restartIce()` |
-| ICE | Host, mDNS `.local` resolution, STUN, TURN over UDP (long-term credentials, channels), relay-only policy |
+| ICE | Host, mDNS `.local` resolution, STUN, TURN over UDP, TCP and TLS (`turn:`, `turns:`, `?transport=`; long-term credentials, channels), relay-only policy |
 | Data channels | Reliable and unreliable, ordered and unordered, negotiated ids, `bufferedAmount` and low-threshold events |
 | Transceivers | W3C `addTrack` reuse, `removeTrack`, `addTransceiver`, directions, `currentDirection`, `replaceTrack`, `setCodecPreferences`, msid stream ids |
 | Audio | Opus, echo cancellation (AEC3), noise suppression and AGC in the engine, one playout clock for all receivers, adaptive jitter buffer, in-band FEC |
-| Video | VP8 both ways via WebCodecs in the page, keyframe requests, bandwidth estimate drives bitrate and resolution, screen-share profile (1080p, 15 fps) |
+| Video | VP8 and H.264 (when WebCodecs can encode it) both ways via WebCodecs in the page, keyframe requests, bandwidth estimate drives bitrate and resolution, screen-share profile (1080p, 15 fps) |
 | Simulcast | Send side sends one layer, the best active encoding |
+| DTMF | `RTCDTMFSender`: `insertDTMF`, `toneBuffer`, `tonechange`, sent as RFC 4733 telephone events |
 | Encoded transforms | `RTCRtpScriptTransform` (LiveKit E2EE), audio and video, send and receive |
-| Stats | `getStats()` with candidate pairs, `inbound-rtp` and `outbound-rtp` |
-| Not yet | DTMF (`canInsertDTMF` is false), TURN over TCP/TLS, H.264/VP9/AV1 send, receive-side simulcast layers |
+| Stats | `getStats()` with candidate pairs, `inbound-rtp` and `outbound-rtp`; the transport reports `tlsGroup` for post-quantum DTLS |
+| Post-quantum | X25519MLKEM768 for DTLS 1.3 and TURN over TLS, on by default (see below) |
+| Not yet | VP9 and AV1, receive-side simulcast layers |
 
 ### How media flows
 
@@ -46,6 +48,37 @@ WebRTC too. Cross-origin frames get nothing.
 - Audio: AudioWorklets move raw PCM between the page and the engine. The engine
   runs the audio processing, Opus and the playout clock.
 - All engine traffic for one peer connection uses one ordered Tauri channel.
+
+### Post-quantum key agreement
+
+Hybrid post-quantum key agreement comes from one of two Cargo features. Both are
+pure Rust and differ only in the ML-KEM implementation:
+
+- `pq-moduletto` (default): [moduletto](https://github.com/crabnebula-dev/moduletto),
+  which also adds ML-KEM-512 groups for engine-to-engine use;
+- `pq-hybrid`: RustCrypto [ml-kem](https://crates.io/crates/ml-kem)
+  (`default-features = false, features = ["pq-hybrid", …]`).
+
+A connection opts in with the non-W3C `postQuantum` member of its configuration:
+
+```js
+new RTCPeerConnection({ iceServers, postQuantum: 'prefer' }); // 'off' | 'prefer' | 'require'
+```
+
+| Policy | DTLS (media and data channels) | TURN over TLS |
+| --- | --- | --- |
+| `off` | DTLS 1.2, classical groups | classical groups |
+| `prefer` (default) | DTLS 1.3 with X25519MLKEM768 when the peer supports it, otherwise DTLS 1.2 | X25519MLKEM768 first, classical groups after |
+| `require` | DTLS 1.3 with post-quantum groups only; other peers fail to connect | TLS 1.3 with post-quantum groups only |
+
+Browsers do not negotiate post-quantum DTLS by default yet. Chromium 141 with its
+`WebRTC-ForceDtls13` and `WebRTC-EnableDtlsPqc` field trials negotiates
+X25519MLKEM768 with the engine; without them it falls back to DTLS 1.2 under
+`prefer`. OpenSSL 3.5 servers (coturn built against it, for example) negotiate
+X25519MLKEM768 for TURN over TLS.
+
+Only the key exchange is post-quantum. Peers still authenticate with ECDSA
+certificates whose fingerprints travel in the signalling.
 
 ### Content Security Policy
 
@@ -59,35 +92,34 @@ without `blob:` in `script-src` (Tchap's main window, for one):
 
 ## Engine
 
-`crates/engine` is sans-I/O WebRTC from [str0m](https://github.com/algesten/str0m)
-driven by tokio, with:
+The engine is [qrtc](https://github.com/crabnebula-dev/qrtc), a separate
+crate: sans-I/O WebRTC from [str0m](https://github.com/algesten/str0m) driven
+by tokio, with pure Rust Opus ([rusty-opus](https://crates.io/crates/rusty-opus)),
+audio processing ([sonora](https://crates.io/crates/sonora)), its own
+STUN/TURN client, mDNS resolver and JSEP layer, and the post-quantum key
+agreement described above. Its README covers the vendored str0m and DTLS
+patches. The plugin's features forward to qrtc's.
 
-- [rusty-opus](https://crates.io/crates/rusty-opus) for Opus (pure Rust);
-- [sonora](https://crates.io/crates/sonora) for AEC3, noise suppression and AGC2
-  (pure Rust port of the WebRTC audio processing module);
-- our own STUN/TURN client, mDNS resolver and JSEP layer.
+TURN over TLS uses rustls with a selectable provider: `turn-tls-ring` (default;
+ring compiles C and assembly) or `turn-tls-rustcrypto` (pure Rust,
+pre-release). With neither, `turns:` servers are skipped. Certificates are
+checked against the platform trust store, with Mozilla's roots as the fallback.
 
-`vendor/str0m` is str0m 0.24.0 with small patches (VP8 PictureID for SFUs, JSEP
-re-offers), and `vendor/str0m-rust-crypto` builds the DTLS certificate with
-RustCrypto, so no C crypto library (AWS-LC) is compiled in. The engine's
-dependency tree has no `-sys` crates. See `vendor/str0m/PATCHES.md`. Minimum
-Rust: 1.91.
-
-`sbom/` holds CycloneDX SBOMs of the engine and the plugin (`cargo cyclonedx`).
+`sbom/` holds the CycloneDX SBOM of the plugin (`cargo cyclonedx`).
 
 ## Layout
 
-- `crates/engine`: `PeerEngine` trait and the native engine.
 - `plugin`: Tauri plugin, commands, and `guest-js/shim.js`.
 - `examples/e2e-app`: Tauri app used by the end-to-end tests.
 - `tests`: Node harnesses (Playwright with Chromium as the other peer).
-- `vendor/str0m`, `vendor/str0m-rust-crypto`: patched str0m.
 - `sbom`: CycloneDX SBOMs.
 
 ## Test
 
 ```sh
-cargo test -p tauri-webrtc-engine                 # JSEP, media, TURN codec, audio processing
+# Engine tests run in qrtc. The TURN and engine-to-Chromium harnesses use its
+# stdio_peer example, from a qrtc checkout next to this one (or QRTC_STDIO_PEER):
+(cd ../qrtc && cargo build --example stdio_peer)
 cd tests && npm install
 node matrix/build.mjs                             # bundles matrix-js-sdk for the Matrix test
 mkdir -p ../examples/e2e-app/dist/lk && cp node_modules/livekit-client/dist/livekit-client.{umd.js,e2ee.worker.mjs} ../examples/e2e-app/dist/lk/
@@ -97,6 +129,8 @@ node shim-e2e.mjs --app $APP                      # p2p: data, video, audio, bot
 node shim-e2e.mjs --app $APP --page index-csp.html  # same, under Tchap's CSP
 node livekit-e2e.mjs --app $APP [--iframe]        # LiveKit room, plain and E2EE (LIVEKIT_SERVER)
 node matrix-e2e.mjs --app $APP                    # matrix-js-sdk 1:1 calls (SYNAPSE_PY)
+node h264-e2e.mjs --app $APP                      # H.264 between two WebKit instances
+node turn-e2e.mjs                                 # TURN over UDP, TCP and TLS (coturn, openssl)
 ```
 
 The harnesses also drive a Tchap build that carries the test hook: point `--app`

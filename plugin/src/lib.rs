@@ -2,7 +2,7 @@
 //!
 //! Injects a W3C-shaped `RTCPeerConnection` / `RTCDataChannel` shim that is
 //! installed only when the webview has no native implementation, and backs it
-//! with a pure Rust engine (str0m-based, see `tauri-webrtc-engine`).
+//! with a pure Rust engine ([qrtc](https://github.com/crabnebula-dev/qrtc), str0m-based).
 //!
 //! ```ignore
 //! tauri::Builder::default().plugin(tauri_plugin_webrtc::init())
@@ -16,7 +16,7 @@ use tauri::ipc::{Channel, InvokeBody, InvokeResponseBody, Request};
 use tauri::plugin::{Builder as PluginBuilder, TauriPlugin};
 use tauri::webview::PageLoadEvent;
 use tauri::{Manager, Runtime, State, Webview};
-use tauri_webrtc_engine::*;
+use qrtc::*;
 
 const SHIM: &str = include_str!("../guest-js/shim.js");
 
@@ -371,6 +371,21 @@ async fn pc_upsert_transceiver<R: Runtime>(
 }
 
 #[tauri::command]
+async fn pc_insert_dtmf<R: Runtime>(
+    webview: Webview<R>,
+    state: State<'_, WebrtcState>,
+    id: u32,
+    tx: TxId,
+    event: u8,
+    duration_ms: u32,
+) -> CmdResult<()> {
+    state
+        .peer(webview.label(), id)?
+        .insert_dtmf(tx, event, duration_ms)
+        .map_err(DomError::from)
+}
+
+#[tauri::command]
 async fn pc_set_transform<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, WebrtcState>,
@@ -617,6 +632,7 @@ impl Builder {
                 pc_upsert_transceiver,
                 pc_request_keyframe,
                 pc_set_transform,
+                pc_insert_dtmf,
                 pc_audio_processing,
                 pc_restart_ice,
                 media_push,
@@ -672,7 +688,7 @@ impl Builder {
 
 #[cfg(target_os = "linux")]
 fn default_engine() -> std::result::Result<Arc<dyn PeerEngine>, String> {
-    tauri_webrtc_engine::native::NativeEngine::new()
+    qrtc::native::NativeEngine::new()
         .map(|e| Arc::new(e) as Arc<dyn PeerEngine>)
         .map_err(|e| e.to_string())
 }

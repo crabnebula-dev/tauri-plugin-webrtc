@@ -95,6 +95,25 @@ try {
   answer = run('webkit', 'audio', { offer: false, freq: 440, expect: 660 });
   results.audioChromiumOffers = await run('chromium', 'audio', { offer: true, freq: 660, expect: 440 });
   results.audioChromiumOffersWebkitSide = await answer;
+  // DTMF both ways; each side sends different tones, the shim side checks what arrived.
+  answer = run('chromium', 'dtmf', { offer: false, tones: '90#', expect: '1A*' });
+  results.dtmfWebkitOffers = await run('webkit', 'dtmf', { offer: true, tones: '1A,*', expect: '90#' });
+  results.dtmfWebkitOffersChromiumSide = await answer;
+  answer = run('webkit', 'dtmf', { offer: false, tones: '7B', expect: '58D' });
+  results.dtmfChromiumOffers = await run('chromium', 'dtmf', { offer: true, tones: '58D', expect: '7B' });
+  results.dtmfChromiumOffersWebkitSide = await answer;
+  // H.264 only, both directions of media, each side offering once. Skipped
+  // when the browser has no H.264 (Playwright's Chromium has no proprietary
+  // codecs; point CHROMIUM at Google Chrome to run it).
+  const h264 = hello.chromium && hello.chromium.h264;
+  if (h264) {
+  answer = run('chromium', 'h264', { offer: false });
+  results.h264WebkitOffers = await run('webkit', 'h264', { offer: true });
+  results.h264WebkitOffersChromiumSide = await answer;
+  answer = run('webkit', 'h264', { offer: false });
+  results.h264ChromiumOffers = await run('chromium', 'h264', { offer: true });
+  results.h264ChromiumOffersWebkitSide = await answer;
+  } else results.h264 = 'skipped: the browser peer has no H.264';
   const c = results.conformance;
   const conformanceOk = c.createAnswerInStable === 'InvalidStateError' && c.addTrack === 'TypeError'
     && c.addIceNoRemote === 'InvalidStateError' && c.sendBeforeOpen === 'InvalidStateError'
@@ -108,6 +127,12 @@ try {
     mediaChromiumOffers: results.mediaChromiumOffers.ok && results.mediaChromiumOffersWebkitSide.ok,
     audioWebkitOffers: results.audioWebkitOffers.ok && results.audioWebkitOffersChromiumSide.ok,
     audioChromiumOffers: results.audioChromiumOffers.ok && results.audioChromiumOffersWebkitSide.ok,
+    dtmfWebkitOffers: results.dtmfWebkitOffers.ok && results.dtmfWebkitOffersChromiumSide.ok,
+    dtmfChromiumOffers: results.dtmfChromiumOffers.ok && results.dtmfChromiumOffersWebkitSide.ok,
+    ...(h264 ? {
+      h264WebkitOffers: results.h264WebkitOffers.ok && results.h264WebkitOffersChromiumSide.ok,
+      h264ChromiumOffers: results.h264ChromiumOffers.ok && results.h264ChromiumOffersWebkitSide.ok,
+    } : {}),
   };
   exitCode = Object.values(results.summary).every(Boolean) ? 0 : 1;
 } catch (e) {

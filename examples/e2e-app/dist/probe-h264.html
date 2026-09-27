@@ -1,0 +1,27 @@
+<!doctype html><html><head><meta charset="utf-8"></head><body><canvas id=c width=640 height=360></canvas>
+<script>
+// Probe: which H.264 configurations WebCodecs can encode and decode in this webview.
+let ws; const wsReady = new Promise((r) => { ws = new WebSocket(window.__E2E_WS__); ws.onopen = r; });
+const t = async (name, f) => { let v; try { v = await Promise.race([f(), new Promise((_, j) => setTimeout(() => j(new Error('hung 8s')), 8000))]); } catch (e) { v = 'throw ' + (e && e.name) + ': ' + (e && e.message); } await wsReady; ws.send(JSON.stringify({ step: name, value: v })); };
+const cfgs = { 'avc1.42e01f': 'baseline 3.1', 'avc1.42001f': 'constrained? 42001f', 'avc1.640028': 'high 4.0', 'avc1.4d001f': 'main 3.1' };
+(async () => {
+  for (const [codec, what] of Object.entries(cfgs)) {
+    await t(`enc ${codec} (${what})`, async () => JSON.stringify((await VideoEncoder.isConfigSupported({ codec, width: 640, height: 360, bitrate: 800000, framerate: 30, latencyMode: 'realtime', avc: { format: 'annexb' } })).supported));
+    await t(`dec ${codec}`, async () => JSON.stringify((await VideoDecoder.isConfigSupported({ codec })).supported));
+  }
+  // Real encode: 30 frames of a moving canvas, Annex B output.
+  await t('encode 30 frames', async () => {
+    const c = document.getElementById('c'); const x = c.getContext('2d');
+    const chunks = [];
+    const enc = new VideoEncoder({ output: (ch, md) => { const b = new Uint8Array(ch.byteLength); ch.copyTo(b); chunks.push({ type: ch.type, n: b.length, head: Array.from(b.slice(0, 6)), desc: !!(md && md.decoderConfig && md.decoderConfig.description) }); }, error: (e) => chunks.push({ err: String(e) }) });
+    enc.configure({ codec: 'avc1.42e01f', width: 640, height: 360, bitrate: 800000, framerate: 30, latencyMode: 'realtime', avc: { format: 'annexb' } });
+    for (let i = 0; i < 30; i++) {
+      x.fillStyle = `hsl(${i * 10},60%,40%)`; x.fillRect(0, 0, 640, 360); x.fillStyle = '#fff'; x.fillRect(i * 10, 100, 80, 80);
+      const f = new VideoFrame(c, { timestamp: i * 33333 }); enc.encode(f, { keyFrame: i === 0 || i === 20 }); f.close();
+    }
+    await enc.flush(); enc.close();
+    return JSON.stringify({ count: chunks.length, keys: chunks.filter((c) => c.type === 'key').length, first: chunks[0], sizes: chunks.slice(0, 5).map((c) => c.n) });
+  });
+  await wsReady; ws.send(JSON.stringify({ done: true }));
+})();
+</script></body></html>

@@ -9,7 +9,7 @@ links = "tauri-plugin-webrtc"
 
 [dependencies]
 tauri = { version = "2" }
-tauri-webrtc-engine = { path = "../crates/engine" }
+tauri-webrtc-engine = { path = "../crates/engine", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -17,3 +17,10 @@ log.workspace = true
 
 [build-dependencies]
 tauri-plugin = { version = "2", features = ["build"] }
+
+[features]
+default = ["turn-tls-ring"]
+# TURN over TLS (turns:) with ring (compiles C and assembly).
+turn-tls-ring = ["tauri-webrtc-engine/turn-tls-ring"]
+# TURN over TLS with the pure-Rust RustCrypto provider (pre-release).
+turn-tls-rustcrypto = ["tauri-webrtc-engine/turn-tls-rustcrypto"]

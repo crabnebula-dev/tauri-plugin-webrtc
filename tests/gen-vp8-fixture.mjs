@@ -1,4 +1,5 @@
-// Generates tests/fixtures/vp8-160x120.bin: 30 VP8 frames from Chromium WebCodecs.
+// Generates qrtc's tests/fixtures/vp8-160x120.bin: 30 VP8 frames from Chromium WebCodecs.
+// Usage: node gen-vp8-fixture.mjs [output path, default ../../qrtc/tests/fixtures/vp8-160x120.bin]
 // Format: repeated [u8 key][u32 LE length][bytes].
 import { chromium } from 'playwright-core';
 import { writeFileSync } from 'node:fs';
@@ -22,5 +23,5 @@ await browser.close();
 srv.close();
 const parts = [];
 for (const [key, bytes] of frames) { const h = Buffer.alloc(5); h[0] = key; h.writeUInt32LE(bytes.length, 1); parts.push(h, Buffer.from(bytes)); }
-writeFileSync('../crates/engine/tests/fixtures/vp8-160x120.bin', Buffer.concat(parts));
+writeFileSync(process.argv[2] || '../../qrtc/tests/fixtures/vp8-160x120.bin', Buffer.concat(parts));
 console.log('frames', frames.length, 'keys', frames.filter((f) => f[0]).length, 'bytes', frames.reduce((a, f) => a + f[1].length, 0));

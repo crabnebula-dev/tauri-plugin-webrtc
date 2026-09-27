@@ -1,9 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/engine", "plugin", "examples/e2e-app"]
-# Vendored crates are path dependencies, not members: keep their default
-# features (aws-lc-rs) out of the workspace resolve and the SBOMs.
-exclude = ["vendor"]
+members = ["plugin", "examples/e2e-app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,8 +14,3 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 log = "0.4"
-
-# Vendored dimpl 0.7.4 with key-encapsulation support for post-quantum
-# groups; see vendor/dimpl/PATCHES.md.
-[patch.crates-io]
-dimpl = { path = "vendor/dimpl" }

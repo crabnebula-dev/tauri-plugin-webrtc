@@ -92,42 +92,34 @@ without `blob:` in `script-src` (Tchap's main window, for one):
 
 ## Engine
 
-`crates/engine` is sans-I/O WebRTC from [str0m](https://github.com/algesten/str0m)
-driven by tokio, with:
-
-- [rusty-opus](https://crates.io/crates/rusty-opus) for Opus (pure Rust);
-- [sonora](https://crates.io/crates/sonora) for AEC3, noise suppression and AGC2
-  (pure Rust port of the WebRTC audio processing module);
-- our own STUN/TURN client, mDNS resolver and JSEP layer.
-
-`vendor/str0m` is str0m 0.24.0 with small patches (VP8 PictureID for SFUs, JSEP
-re-offers), and `vendor/str0m-rust-crypto` builds the DTLS certificate with
-RustCrypto, so AWS-LC is not compiled in. `vendor/dimpl` is dimpl 0.7.4 with
-key encapsulation groups for post-quantum DTLS 1.3. See
-`vendor/str0m/PATCHES.md` and `vendor/dimpl/PATCHES.md`. The engine's dependency
-tree has no `-sys` crates. Minimum Rust: 1.91.
+The engine is [qrtc](https://github.com/crabnebula-dev/qrtc), a separate
+crate: sans-I/O WebRTC from [str0m](https://github.com/algesten/str0m) driven
+by tokio, with pure Rust Opus ([rusty-opus](https://crates.io/crates/rusty-opus)),
+audio processing ([sonora](https://crates.io/crates/sonora)), its own
+STUN/TURN client, mDNS resolver and JSEP layer, and the post-quantum key
+agreement described above. Its README covers the vendored str0m and DTLS
+patches. The plugin's features forward to qrtc's.
 
 TURN over TLS uses rustls with a selectable provider: `turn-tls-ring` (default;
 ring compiles C and assembly) or `turn-tls-rustcrypto` (pure Rust,
 pre-release). With neither, `turns:` servers are skipped. Certificates are
 checked against the platform trust store, with Mozilla's roots as the fallback.
 
-`sbom/` holds CycloneDX SBOMs of the engine and the plugin (`cargo cyclonedx`).
+`sbom/` holds the CycloneDX SBOM of the plugin (`cargo cyclonedx`).
 
 ## Layout
 
-- `crates/engine`: `PeerEngine` trait and the native engine.
 - `plugin`: Tauri plugin, commands, and `guest-js/shim.js`.
 - `examples/e2e-app`: Tauri app used by the end-to-end tests.
 - `tests`: Node harnesses (Playwright with Chromium as the other peer).
-- `vendor/str0m`, `vendor/str0m-rust-crypto`, `vendor/dimpl`: patched str0m and DTLS.
 - `sbom`: CycloneDX SBOMs.
 
 ## Test
 
 ```sh
-cargo test -p tauri-webrtc-engine                 # JSEP, media, TURN codec, audio processing, DTMF
-cargo test -p tauri-webrtc-engine --features pq-moduletto  # plus post-quantum DTLS between engines
+# Engine tests run in qrtc. The TURN and engine-to-Chromium harnesses use its
+# stdio_peer example, from a qrtc checkout next to this one (or QRTC_STDIO_PEER):
+(cd ../qrtc && cargo build --example stdio_peer)
 cd tests && npm install
 node matrix/build.mjs                             # bundles matrix-js-sdk for the Matrix test
 mkdir -p ../examples/e2e-app/dist/lk && cp node_modules/livekit-client/dist/livekit-client.{umd.js,e2ee.worker.mjs} ../examples/e2e-app/dist/lk/
@@ -139,7 +131,6 @@ node livekit-e2e.mjs --app $APP [--iframe]        # LiveKit room, plain and E2EE
 node matrix-e2e.mjs --app $APP                    # matrix-js-sdk 1:1 calls (SYNAPSE_PY)
 node h264-e2e.mjs --app $APP                      # H.264 between two WebKit instances
 node turn-e2e.mjs                                 # TURN over UDP, TCP and TLS (coturn, openssl)
-node pq-tls-interop.mjs pq-moduletto              # post-quantum TLS against OpenSSL 3.5 (Node)
 ```
 
 The harnesses also drive a Tchap build that carries the test hook: point `--app`

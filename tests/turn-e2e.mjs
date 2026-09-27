@@ -1,7 +1,8 @@
 // TURN over UDP, TCP and TLS: the engine (stdio_peer) gathers relay-only
 // candidates through a local coturn and opens a data channel with Chromium.
 // Needs `turnserver` (coturn) and `openssl` on PATH; the stdio_peer example
-// must be built (cargo build -p tauri-webrtc-engine --example stdio_peer).
+// must be built in a qrtc checkout (cargo build --example stdio_peer); see
+// engine-chromium.mjs for where it is looked up.
 // Usage: node turn-e2e.mjs
 import { spawn, execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
@@ -45,7 +46,7 @@ for (const [name, url] of Object.entries(cases)) {
   const out = await new Promise((res) => {
     const c = spawn('node', [path.join(here, 'engine-chromium.mjs'), '--engine-config', cfg], {
       // Only the throwaway CA is trusted for this run.
-      env: { ...process.env, SSL_CERT_FILE: path.join(dir, 'ca.pem'), RUST_LOG: 'tauri_webrtc_engine=debug' },
+      env: { ...process.env, SSL_CERT_FILE: path.join(dir, 'ca.pem'), RUST_LOG: 'qrtc=debug' },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let s = ''; c.stdout.on('data', (d) => { s += d; }); c.stderr.on('data', (d) => { s += d; });

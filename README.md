@@ -23,6 +23,28 @@ handling.
 The shim runs in every same-origin frame, so an embedded Element Call widget gets
 WebRTC too. Cross-origin frames get nothing.
 
+## Architecture on Linux
+
+```mermaid
+flowchart TB
+  app["App JavaScript (unchanged)"]
+  shim["JS shim: RTCPeerConnection, RTCDataChannel"]
+  page["In the page: getUserMedia (WebKitGTK),<br/>WebCodecs VP8 and H.264, AudioWorklets"]
+  ipc["Tauri IPC: invoke + one ordered Channel<br/>per peer connection"]
+  core["Plugin core: sessions and state per webview"]
+  engine["Engine: qrtc (PeerEngine trait)"]
+  net["Network: ICE, STUN/TURN, DTLS, SRTP, SCTP"]
+  app --> shim --> ipc --> core --> engine --> net
+  shim <--> page
+```
+
+The shim is the only part the app sees. Capture, video encoding and decoding,
+and playback stay in the page, so camera and microphone permissions remain the
+webview's. Video crosses IPC only encoded; audio crosses as PCM, because the
+engine runs echo cancellation, Opus and the playout clock. The plugin core keeps
+each webview's peer connections and tears them down when the page navigates or
+closes.
+
 ## What is covered
 
 | Area | Status |

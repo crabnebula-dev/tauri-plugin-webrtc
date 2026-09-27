@@ -15,6 +15,8 @@ import path from 'node:path';
 import net from 'node:net';
 import os from 'node:os';
 
+// Linux runs the app under xvfb-run; other platforms launch it directly.
+const headless = (bin) => (process.platform === 'linux' ? ['xvfb-run', ['-a', bin]] : [bin, []]);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
 const arg = (n, d) => (argv.includes(n) ? argv[argv.indexOf(n) + 1] : d);
@@ -83,7 +85,7 @@ const run = (name, opts, ms = 90000) => new Promise((resolve) => {
   clients[name].send(JSON.stringify({ t: 'run', what: 'livekit', opts }));
 });
 
-const browser = await chromium.launch({ executablePath: exe, args: ['--autoplay-policy=no-user-gesture-required'] });
+const browser = await chromium.launch({ executablePath: exe, args: ['--autoplay-policy=no-user-gesture-required', '--disable-features=LocalNetworkAccessChecks'] });
 const page = await browser.newPage();
 page.on('console', (m) => { if (m.type() === 'error') console.error('[chromium console]', m.text()); });
 await page.addInitScript((u) => { window.__E2E_WS__ = u; window.__E2E_NAME__ = 'chromium'; }, wsUrl);
@@ -94,7 +96,7 @@ if (tchap) {
   const src = readFileSync(path.join(dist, 'lk/livekit-client.e2ee.worker.mjs'), 'utf8');
   writeFileSync(tchapWorker, `window.__LK_WORKER_URL__ = URL.createObjectURL(new Blob([${JSON.stringify(src)}], { type: 'text/javascript' }));\n`);
 }
-const app = spawn('xvfb-run', ['-a', appBin], {
+const app = spawn(...headless(appBin), {
   detached: true, // own process group: xvfb-run, Xvfb and the app die together
   env: {
     ...process.env, E2E_WS: wsUrl, E2E_PAGE: iframe ? 'lk-frame.html' : 'lk.html', RUST_LOG: process.env.RUST_LOG || 'warn',

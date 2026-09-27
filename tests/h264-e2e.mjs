@@ -12,6 +12,8 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
+// Linux runs the app under xvfb-run; other platforms launch it directly.
+const headless = (bin) => (process.platform === 'linux' ? ['xvfb-run', ['-a', bin]] : [bin, []]);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
 const appBin = argv.includes('--app') ? argv[argv.indexOf('--app') + 1] : path.join(root, 'target/debug/e2e-app');
@@ -35,7 +37,7 @@ const run = (name, what, opts, ms = 60000) => new Promise((resolve) => {
   clients[name].send(JSON.stringify({ t: 'run', what, opts }));
 });
 
-const apps = ['a', 'b'].map((n) => spawn('xvfb-run', ['-a', appBin], {
+const apps = ['a', 'b'].map((n) => spawn(...headless(appBin), {
   detached: true,
   env: { ...process.env, E2E_WS: url, E2E_NAME: `webkit-${n}`, RUST_LOG: process.env.RUST_LOG || 'warn' },
   stdio: 'ignore',

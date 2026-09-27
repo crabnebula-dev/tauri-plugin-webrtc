@@ -33,7 +33,7 @@ function startPeer(role) {
 }
 
 const args = ['--use-fake-ui-for-media-stream', ...(process.env.CHROMIUM_ARGS ? process.env.CHROMIUM_ARGS.split(' ') : [])];
-if (!mdns) args.push('--disable-features=WebRtcHideLocalIpsWithMdns');
+args.push('--disable-features=' + (mdns ? 'LocalNetworkAccessChecks' : 'WebRtcHideLocalIpsWithMdns,LocalNetworkAccessChecks'));
 const browser = await chromium.launch({ executablePath: exe, args });
 const results = {};
 

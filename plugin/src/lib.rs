@@ -602,7 +602,7 @@ impl Builder {
     pub fn build<R: Runtime>(self) -> TauriPlugin<R> {
         let engine: std::result::Result<Arc<dyn PeerEngine>, String> = match self.engine {
             Some(e) => Ok(e),
-            None => default_engine(),
+            None => default_engine(self.force_shim),
         };
         if let Err(e) = &engine {
             log::warn!("tauri-plugin-webrtc: engine unavailable, shim disabled: {e}");
@@ -686,16 +686,15 @@ impl Builder {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn default_engine() -> std::result::Result<Arc<dyn PeerEngine>, String> {
+// The engine starts on Linux, where WebKitGTK lacks WebRTC. Elsewhere the webview
+// has native WebRTC, so the engine only starts when the shim is forced (tests).
+fn default_engine(force: bool) -> std::result::Result<Arc<dyn PeerEngine>, String> {
+    if !cfg!(target_os = "linux") && !force {
+        return Err("no default engine on this platform; the webview has native WebRTC".into());
+    }
     qrtc::native::NativeEngine::new()
         .map(|e| Arc::new(e) as Arc<dyn PeerEngine>)
         .map_err(|e| e.to_string())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn default_engine() -> std::result::Result<Arc<dyn PeerEngine>, String> {
-    Err("no default engine on this platform; the webview has native WebRTC".into())
 }
 
 /// Plugin with default settings.

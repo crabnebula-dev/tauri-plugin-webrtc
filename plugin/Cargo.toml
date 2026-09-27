@@ -24,3 +24,7 @@ default = ["turn-tls-ring"]
 turn-tls-ring = ["tauri-webrtc-engine/turn-tls-ring"]
 # TURN over TLS with the pure-Rust RustCrypto provider (pre-release).
 turn-tls-rustcrypto = ["tauri-webrtc-engine/turn-tls-rustcrypto"]
+# Post-quantum key agreement (X25519MLKEM768) for DTLS 1.3 and TURN over TLS,
+# with RustCrypto ml-kem or with moduletto. See the engine manifest.
+pq-hybrid = ["tauri-webrtc-engine/pq-hybrid"]
+pq-moduletto = ["tauri-webrtc-engine/pq-moduletto"]

@@ -5,7 +5,7 @@ import { writeFileSync } from 'node:fs';
 import http from 'node:http';
 const srv = http.createServer((_, r) => r.end('<!doctype html>ok')).listen(0, '127.0.0.1');
 await new Promise((r) => srv.on('listening', r));
-const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome' });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM });
 const page = await browser.newPage();
 await page.goto(`http://127.0.0.1:${srv.address().port}/`);
 const frames = await page.evaluate(async () => {

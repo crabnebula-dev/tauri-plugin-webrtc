@@ -13,7 +13,7 @@ const argv = process.argv.slice(2);
 const appBin = argv.includes('--app') ? argv[argv.indexOf('--app') + 1] : path.join(root, 'target/debug/e2e-app');
 const mdns = argv.includes('--mdns');
 const pageName = argv.includes('--page') ? argv[argv.indexOf('--page') + 1] : 'index.html';
-const exe = process.env.CHROMIUM || '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
+const exe = process.env.CHROMIUM || undefined /* Playwright bundled Chromium */;
 const scenarios = readFileSync(path.join(root, 'examples/e2e-app/dist/scenarios.js'), 'utf8');
 
 const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 });

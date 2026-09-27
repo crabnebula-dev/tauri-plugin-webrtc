@@ -22,8 +22,8 @@ const arg = (n, d) => (argv.includes(n) ? argv[argv.indexOf(n) + 1] : d);
 const appBin = arg('--app', path.join(root, 'target/debug/e2e-app'));
 const only = arg('--only', null);
 const tchap = argv.includes('--tchap');
-const exe = process.env.CHROMIUM || '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
-const py = process.env.SYNAPSE_PY || '/home/claude/synapse-venv/bin/python';
+const exe = process.env.CHROMIUM || undefined /* Playwright bundled Chromium */;
+const py = process.env.SYNAPSE_PY || 'python3';
 const dist = path.join(root, 'examples/e2e-app/dist');
 if (!existsSync(path.join(dist, 'mx/matrix.js'))) {
   console.error('missing dist/mx/matrix.js: run node tests/matrix/build.mjs and rebuild e2e-app');

@@ -28,8 +28,8 @@ const tchap = argv.includes('--tchap');
 // Tchap has no copy of the worker: hand it over as a blob URL (a bundler
 // inline worker, which the shim wraps too).
 const tchapWorker = path.join(os.tmpdir(), 'tauri-webrtc-lk-worker.js');
-const exe = process.env.CHROMIUM || '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
-const lkBin = process.env.LIVEKIT_SERVER || '/home/claude/livekit/livekit-server';
+const exe = process.env.CHROMIUM || undefined /* Playwright bundled Chromium */;
+const lkBin = process.env.LIVEKIT_SERVER || 'livekit-server';
 const dist = path.join(root, 'examples/e2e-app/dist');
 for (const f of ['lk/livekit-client.umd.js', 'lk/livekit-client.e2ee.worker.mjs']) {
   if (!existsSync(path.join(dist, f))) {

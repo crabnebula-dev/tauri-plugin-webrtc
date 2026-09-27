@@ -12,7 +12,7 @@ const mdns = process.argv.includes('--mdns');
 const argVal = (k) => (process.argv.includes(k) ? process.argv[process.argv.indexOf(k) + 1] : null);
 const engineConfig = argVal('--engine-config');
 const browserConfig = JSON.parse(argVal('--browser-config') || '{}');
-const exe = process.env.CHROMIUM || '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
+const exe = process.env.CHROMIUM || undefined /* Playwright bundled Chromium */;
 
 function startPeer(role) {
   const child = spawn(bin, [role], { stdio: ['pipe', 'pipe', 'inherit'], env: { ...process.env, ...(engineConfig ? { WEBRTC_CONFIG: engineConfig } : {}) } });

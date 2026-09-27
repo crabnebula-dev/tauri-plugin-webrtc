@@ -131,7 +131,17 @@ ring compiles C and assembly) or `turn-tls-rustcrypto` (pure Rust,
 pre-release). With neither, `turns:` servers are skipped. Certificates are
 checked against the platform trust store, with Mozilla's roots as the fallback.
 
-`sbom/` holds the CycloneDX SBOM of the plugin (`cargo cyclonedx`).
+`sbom/` holds the CycloneDX SBOM of the plugin, regenerated whenever
+`Cargo.lock` changes:
+
+```sh
+cargo cyclonedx --manifest-path plugin/Cargo.toml --spec-version 1.5 \
+  --format json --target x86_64-unknown-linux-gnu --override-filename tauri-plugin-webrtc
+mv plugin/tauri-plugin-webrtc.json sbom/tauri-plugin-webrtc.cdx.json
+```
+
+`deny.toml` configures cargo-deny (advisories, licences, bans, sources); CI
+runs it on every push and weekly.
 
 ## Layout
 

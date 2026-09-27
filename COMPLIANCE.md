@@ -35,6 +35,7 @@ Article 64(10)(b) excludes administrative fines against open-source software ste
 - Changes are merged by the maintainer. Commits and releases are signed.
 - The plugin is tested end to end in a Tauri app on WebKitGTK against headless Chromium: data channels, video and audio both ways, LiveKit rooms with and without E2EE, matrix-js-sdk 1:1 calls through Synapse, TURN over UDP, TCP and TLS through coturn, DTMF, and H.264 between two WebKit instances (`tests/`). The same harnesses drive Tchap desktop builds.
 - The engine is tested in qrtc's CI on every push, with advisory checks, an SBOM drift check and interoperability tests against OpenSSL and Chromium.
+- The plugin's own dependency tree is checked with cargo-deny on every push and weekly (`deny.toml`, `.github/workflows/ci.yml`): RustSec advisories, licences, duplicate and wildcard dependencies, and dependency sources. An advisory that cannot be fixed by an update is accepted only with a written reason in `deny.toml` that says how the plugin reaches the crate and why the flaw is not reachable; each entry is dropped once a fix is available.
 - The shim installs only when the webview has no `RTCPeerConnection`. Capture and peer access need explicit Tauri permissions; the default set grants no camera, microphone or screen capture.
 - The plugin uses no `unsafe` code of its own. `sbom/tauri-plugin-webrtc.cdx.json` is a CycloneDX 1.5 SBOM of the plugin with its default features.
 

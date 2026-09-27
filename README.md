@@ -131,7 +131,17 @@ ring compiles C and assembly) or `turn-tls-rustcrypto` (pure Rust,
 pre-release). With neither, `turns:` servers are skipped. Certificates are
 checked against the platform trust store, with Mozilla's roots as the fallback.
 
-`sbom/` holds the CycloneDX SBOM of the plugin (`cargo cyclonedx`).
+`sbom/` holds the CycloneDX SBOM of the plugin, regenerated whenever
+`Cargo.lock` changes:
+
+```sh
+cargo cyclonedx --manifest-path plugin/Cargo.toml --spec-version 1.5 \
+  --format json --target x86_64-unknown-linux-gnu --override-filename tauri-plugin-webrtc
+mv plugin/tauri-plugin-webrtc.json sbom/tauri-plugin-webrtc.cdx.json
+```
+
+`deny.toml` configures cargo-deny (advisories, licences, bans, sources); CI
+runs it on every push and weekly.
 
 ## Layout
 
@@ -164,6 +174,17 @@ at it, and add `--tchap` for the LiveKit and Matrix tests.
 
 The LiveKit test needs a `livekit-server` binary. The Matrix test runs Synapse as
 a fixture; `SYNAPSE_PY` points at a Python with `matrix-synapse` installed.
+
+On macOS the same suites run against WKWebView with the shim forced over its
+native WebRTC. Build the e2e app as above, then set `E2E_FORCE_SHIM=1` and point
+`CHROMIUM` at Google Chrome, which has H.264:
+
+```sh
+E2E_FORCE_SHIM=1 CHROMIUM="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" node shim-e2e.mjs --app $APP
+```
+
+The harnesses launch the app directly outside Linux, so no Xvfb is needed. This
+checks the shim, the engine and the browser interop, not WebKitGTK.
 
 ## Licence and compliance
 

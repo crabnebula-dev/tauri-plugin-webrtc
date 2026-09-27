@@ -16,6 +16,8 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import net from 'node:net';
 
+// Linux runs the app under xvfb-run; other platforms launch it directly.
+const headless = (bin) => (process.platform === 'linux' ? ['xvfb-run', ['-a', bin]] : [bin, []]);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
 const arg = (n, d) => (argv.includes(n) ? argv[argv.indexOf(n) + 1] : d);
@@ -108,14 +110,14 @@ const run = (name, opts, ms = 120000) => new Promise((resolve) => {
   clients[name].send(JSON.stringify({ t: 'run', what: 'matrix', opts }));
 });
 
-const browser = await chromium.launch({ executablePath: exe, args: ['--autoplay-policy=no-user-gesture-required'] });
+const browser = await chromium.launch({ executablePath: exe, args: ['--autoplay-policy=no-user-gesture-required', '--disable-features=LocalNetworkAccessChecks'] });
 const page = await browser.newPage();
 page.on('console', (m) => { if (m.type() === 'error') console.error('[chromium console]', m.text().slice(0, 300)); });
 await page.addInitScript((u) => { window.__E2E_WS__ = u; window.__E2E_NAME__ = 'chromium'; }, wsUrl);
 await page.goto(`http://127.0.0.1:${http.address().port}/mx.html`);
 
 const killGroup = (p) => { try { process.kill(-p.pid, 'SIGTERM'); } catch { p.kill('SIGTERM'); } };
-const app = spawn('xvfb-run', ['-a', appBin], {
+const app = spawn(...headless(appBin), {
   detached: true,
   env: {
     ...process.env, E2E_WS: wsUrl, E2E_PAGE: 'mx.html', RUST_LOG: process.env.RUST_LOG || 'warn',

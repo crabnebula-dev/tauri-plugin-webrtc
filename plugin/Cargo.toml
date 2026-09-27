@@ -10,7 +10,7 @@ links = "tauri-plugin-webrtc"
 [dependencies]
 tauri = { version = "2" }
 # The WebRTC engine: https://github.com/crabnebula-dev/qrtc
-qrtc = { git = "https://github.com/crabnebula-dev/qrtc", branch = "main", default-features = false }
+qrtc = { git = "https://github.com/crabnebula-dev/qrtc", branch = "main", version = "0.1.0", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -1,0 +1,78 @@
+# cargo-deny: advisories, licences, banned crates and sources.
+# CI runs `cargo deny check` on every push and weekly (.github/workflows/ci.yml).
+# Run it locally with `cargo install cargo-deny && cargo deny check`.
+
+[graph]
+# Every feature, so the optional TURN over TLS and post-quantum paths are
+# checked too.
+all-features = true
+
+[advisories]
+# RustSec advisories fail the check; yanked crates too.
+yanked = "deny"
+git-fetch-with-cli = true
+# Each ignore is reviewed against how the plugin reaches the crate. Revisit
+# on every review of this file; drop an entry as soon as a fix is available.
+ignore = [
+    # rustls-webpki 0.102.8: CRL and name-constraint bugs in certificate
+    # path validation. Reached only through rustls-rustcrypto (feature
+    # turn-tls-rustcrypto, off by default), which imports its algorithm id
+    # constants and nothing else. rustls validates paths with its own
+    # rustls-webpki 0.103, which is fixed. Same assessment as qrtc's.
+    { id = "RUSTSEC-2026-0049", reason = "0.102.8 only supplies alg_id constants; path validation uses rustls-webpki 0.103" },
+    { id = "RUSTSEC-2026-0098", reason = "0.102.8 only supplies alg_id constants; path validation uses rustls-webpki 0.103" },
+    { id = "RUSTSEC-2026-0099", reason = "0.102.8 only supplies alg_id constants; path validation uses rustls-webpki 0.103" },
+    { id = "RUSTSEC-2026-0104", reason = "0.102.8 only supplies alg_id constants; path validation uses rustls-webpki 0.103" },
+    # rsa (Marvin): timing leak in RSA private-key operations. The engine
+    # holds no RSA private key; TURN over TLS uses no client certificate.
+    { id = "RUSTSEC-2023-0071", reason = "no RSA private-key operations in the engine" },
+    # glib 0.18: unsound VariantStrIter iterator (fixed in glib 0.20).
+    # Tauri 2 and wry build on gtk-rs 0.18, which pins glib 0.18. Neither
+    # the plugin nor Tauri iterates GVariant string arrays through
+    # VariantStrIter. Drop when Tauri moves to gtk-rs 0.20.
+    { id = "RUSTSEC-2024-0429", reason = "glib pinned to 0.18 by Tauri's gtk-rs stack; VariantStrIter is not used" },
+    # Unmaintained crates, all build time only:
+    # paste: proc-macro reached through the engine's post-quantum feature.
+    { id = "RUSTSEC-2024-0436", reason = "build-time proc-macro, no runtime code" },
+    # proc-macro-error: used by glib-macros 0.18 (Tauri's gtk-rs stack).
+    { id = "RUSTSEC-2024-0370", reason = "build-time proc-macro via glib-macros; goes with gtk-rs 0.18" },
+    # unic-*: Unicode tables used by urlpattern in tauri-utils to match
+    # capability URL patterns at build time and in the runtime's ACL.
+    { id = "RUSTSEC-2025-0075", reason = "unic-char-range via tauri-utils/urlpattern; static Unicode tables" },
+    { id = "RUSTSEC-2025-0080", reason = "unic-common via tauri-utils/urlpattern; static Unicode tables" },
+    { id = "RUSTSEC-2025-0081", reason = "unic-char-property via tauri-utils/urlpattern; static Unicode tables" },
+    { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version via tauri-utils/urlpattern; static Unicode tables" },
+    { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident via tauri-utils/urlpattern; static Unicode tables" },
+]
+
+[licenses]
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CDLA-Permissive-2.0",
+    # File-level copyleft, unmodified: cssparser, selectors and dtoa-short
+    # (Tauri's HTML and CSP processing) and option-ext (dirs).
+    "MPL-2.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# The e2e app (publish = false) depends on the plugin by path alone.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# The engine and its ML-KEM backend, both CrabNebula repositories.
+allow-git = [
+    "https://github.com/crabnebula-dev/qrtc",
+    "https://github.com/crabnebula-dev/moduletto",
+]

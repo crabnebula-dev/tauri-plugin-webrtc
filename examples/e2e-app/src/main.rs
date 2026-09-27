@@ -7,7 +7,13 @@ fn main() {
     // Harness name of this instance (two apps can join one run).
     let name = std::env::var("E2E_NAME").unwrap_or_else(|_| "webkit".into());
     tauri::Builder::default()
-        .plugin(tauri_plugin_webrtc::init())
+        // E2E_FORCE_SHIM=1 installs the shim over a webview that has native WebRTC
+        // (WKWebView on macOS), so the suites run there too.
+        .plugin(
+            tauri_plugin_webrtc::Builder::new()
+                .force_shim(std::env::var_os("E2E_FORCE_SHIM").is_some())
+                .build(),
+        )
         .setup(move |app| {
             WebviewWindowBuilder::new(
                 app,

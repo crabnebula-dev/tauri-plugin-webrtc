@@ -8,6 +8,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
+// Linux runs the app under xvfb-run; other platforms launch it directly.
+const headless = (bin) => (process.platform === 'linux' ? ['xvfb-run', ['-a', bin]] : [bin, []]);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
 const appBin = argv.includes('--app') ? argv[argv.indexOf('--app') + 1] : path.join(root, 'target/debug/e2e-app');
@@ -47,7 +49,8 @@ const run = (name, what, opts, ms = 60000) => new Promise((resolve) => {
 });
 
 // Chromium side.
-const args = ['--autoplay-policy=no-user-gesture-required', ...(mdns ? [] : ['--disable-features=WebRtcHideLocalIpsWithMdns'])];
+// Chrome 154 blocks loopback WebSockets from about:blank without the last flag.
+const args = ['--autoplay-policy=no-user-gesture-required', '--disable-features=' + ['LocalNetworkAccessChecks', ...(mdns ? [] : ['WebRtcHideLocalIpsWithMdns'])].join(',')];
 const browser = await chromium.launch({ executablePath: exe, args });
 const page = await browser.newPage();
 page.on('console', (m) => { if (m.type() === 'error') console.log('[chromium]', m.text()); });
@@ -57,7 +60,7 @@ await page.evaluate((u) => connectHarness('chromium', u), url);
 
 // WebKitGTK side: the Tauri app, as Tchap would ship it.
 const killGroup = (p) => { try { process.kill(-p.pid, 'SIGTERM'); } catch { p.kill('SIGTERM'); } };
-const app = spawn('xvfb-run', ['-a', appBin], {
+const app = spawn(...headless(appBin), {
   detached: true, // own process group: xvfb-run, Xvfb and the app die together
   env: { ...process.env, E2E_WS: url, E2E_PAGE: pageName, TCHAP_WEBRTC_E2E_WS: url, TCHAP_WEBRTC_E2E_SCENARIOS: path.join(root, 'examples/e2e-app/dist/scenarios.js'), RUST_LOG: process.env.RUST_LOG || 'warn' },
   stdio: ['ignore', 'inherit', 'pipe'],

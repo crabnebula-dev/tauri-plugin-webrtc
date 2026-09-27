@@ -4,5 +4,5 @@
 <script src="scenarios.js"></script>
 <script>
   const log = (s) => { document.getElementById('log').textContent += '\n' + s; };
-  connectHarness('webkit', window.__E2E_WS__, log);
+  connectHarness(window.__E2E_NAME__ || 'webkit', window.__E2E_WS__, log);
 </script></body></html>

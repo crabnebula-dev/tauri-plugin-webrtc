@@ -4,7 +4,8 @@
 function describeEnv() {
   const shim = window.RTCPeerConnection && RTCPeerConnection.__tauriShim;
   // Under a CSP without blob: scripts the shim withdraws RTCRtpScriptTransform.
-  return { shim: shim || null, ua: navigator.userAgent, scriptTransform: typeof window.RTCRtpScriptTransform };
+  const h264 = !!(window.RTCRtpSender && RTCRtpSender.getCapabilities && (RTCRtpSender.getCapabilities('video') || { codecs: [] }).codecs.some((c) => /h264/i.test(c.mimeType)));
+  return { shim: shim || null, ua: navigator.userAgent, scriptTransform: typeof window.RTCRtpScriptTransform, h264 };
 }
 
 // Checks that only make sense against the shim: error mapping and states.
@@ -182,6 +183,7 @@ function connectHarness(name, url, log = console.log) {
       else if (m.what === 'mediaAnswer') result = await roleMediaAnswer(sig);
       else if (m.what === 'audio') result = await roleAudio(sig, m.opts);
       else if (m.what === 'dtmf') result = await roleDtmf(sig, m.opts);
+      else if (m.what === 'h264') result = await roleH264(sig, m.opts);
     } catch (err) {
       result = { ok: false, error: `${err && err.name}: ${err && err.message}` };
     }
@@ -428,4 +430,66 @@ async function roleDtmf(sig, opts) {
   out.ok = !out.before && out.canInsert && out.badTone === 'InvalidCharacterError' && sentOk
     && (!RTCPeerConnection.__tauriShim || out.received === expect);
   return out;
+}
+
+// ------------------------------------------------------------------ H.264
+// Both sides send video and allow only H.264 on their transceiver, so each
+// must encode and decode H.264. Checks the codec on the wire both ways and
+// that frames decode.
+async function roleH264(sig, opts) {
+  const { offer } = opts;
+  const pc = new RTCPeerConnection();
+  const flush = wirePeer(pc, sig);
+  const cam = canvasTrack(offer ? 'offerer' : 'answerer');
+  const h264 = RTCRtpSender.getCapabilities('video').codecs.filter((c) => /h264/i.test(c.mimeType) && /packetization-mode=1/.test(c.sdpFmtpLine || ''));
+  const out = { h264Caps: h264.length };
+  if (!h264.length) return { ok: false, error: 'no H.264 in getCapabilities' };
+  let remote = null;
+  pc.ontrack = (e) => { remote = e.track; };
+  const finished = new Promise((res) => sig.on((m) => { if (m.kind === 'done') res(); }));
+  const prefer = (t) => t.setCodecPreferences(h264);
+  if (offer) {
+    const tr = pc.addTransceiver(cam.track, { direction: 'sendrecv', streams: [cam.stream] });
+    prefer(tr);
+    const answered = new Promise((res) => sig.on(async (m) => { if (m.kind === 'sdp' && m.desc.type === 'answer') { await pc.setRemoteDescription(m.desc); await flush(); res(); } }));
+    await pc.setLocalDescription(await pc.createOffer());
+    out.offerFirstCodec = firstVideoCodec(pc.localDescription.sdp);
+    sig.send({ kind: 'sdp', desc: pc.localDescription.toJSON ? pc.localDescription.toJSON() : pc.localDescription });
+    await answered;
+  } else {
+    await new Promise((res) => sig.on(async (m) => {
+      if (m.kind === 'sdp' && m.desc.type === 'offer') {
+        await pc.setRemoteDescription(m.desc);
+        const tr = pc.getTransceivers()[0];
+        tr.direction = 'sendrecv';
+        await tr.sender.replaceTrack(cam.track);
+        prefer(tr);
+        await pc.setLocalDescription(await pc.createAnswer());
+        out.answerFirstCodec = firstVideoCodec(pc.localDescription.sdp);
+        sig.send({ kind: 'sdp', desc: pc.localDescription.toJSON ? pc.localDescription.toJSON() : pc.localDescription });
+        await flush(); res();
+      }
+    }));
+  }
+  for (let k = 0; k < 50 && (!remote || pc.connectionState !== 'connected'); k++) await new Promise((r) => setTimeout(r, 100));
+  await new Promise((r) => setTimeout(r, 4000));
+  const stats = await pc.getStats();
+  const codecOf = (s) => (s.mimeType ? s.mimeType : s.codecId && stats.get(s.codecId) ? stats.get(s.codecId).mimeType : undefined);
+  stats.forEach((s) => {
+    if (s.kind !== 'video') return;
+    if (s.type === 'outbound-rtp') out.sent = { codec: codecOf(s), framesSent: s.framesSent, keyFrames: s.keyFramesEncoded };
+    if (s.type === 'inbound-rtp') out.received = { codec: codecOf(s), framesDecoded: s.framesDecoded, width: s.frameWidth, height: s.frameHeight };
+  });
+  if (offer) sig.send({ kind: 'done' }); else await finished;
+  if (offer) await new Promise((r) => setTimeout(r, 300));
+  cam.stop(); pc.close();
+  const isH264 = (c) => /h264/i.test(c || '');
+  out.ok = !!out.sent && !!out.received && isH264(out.sent.codec) && isH264(out.received.codec) && out.sent.framesSent > 20 && out.received.framesDecoded > 20;
+  return out;
+}
+function firstVideoCodec(sdp) {
+  const lines = sdp.split(/\r?\n/); const m = lines.find((l) => l.startsWith('m=video'));
+  if (!m) return null;
+  const pt = m.split(' ')[3]; const r = lines.find((l) => l.startsWith(`a=rtpmap:${pt} `));
+  return r && r.split(' ')[1];
 }

@@ -35,7 +35,8 @@ node livekit-e2e.mjs --app $APP --iframe
 node matrix-e2e.mjs --app $APP
 node h264-e2e.mjs --app $APP
 node turn-e2e.mjs</code></pre>
-<p>The harnesses start the app under <code>xvfb-run</code>, so they need Xvfb but no display. Each exits non-zero when a check fails.</p>
+<p>On Linux the harnesses start the app under <code>xvfb-run</code>, so they need Xvfb but no display. Each exits non-zero when a check fails.</p>
+<p>On macOS the same suites run against WKWebView with the shim forced over its native WebRTC: set <code>E2E_FORCE_SHIM=1</code> and point <code>CHROMIUM</code> at Google Chrome, which has H.264. The app is launched directly. This checks the shim, the engine and browser interop, not WebKitGTK.</p>
 
 <h2>Testing your own app</h2>
 <p>The harnesses also drive a Tchap build that carries a small, test-only hook: pass it as <code>--app</code>, and add <code>--tchap</code> to the LiveKit and Matrix tests. The hook connects the app to the harness's WebSocket so scenarios can run inside it. Build it into test builds only.</p>

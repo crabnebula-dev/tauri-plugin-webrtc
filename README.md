@@ -165,6 +165,17 @@ at it, and add `--tchap` for the LiveKit and Matrix tests.
 The LiveKit test needs a `livekit-server` binary. The Matrix test runs Synapse as
 a fixture; `SYNAPSE_PY` points at a Python with `matrix-synapse` installed.
 
+On macOS the same suites run against WKWebView with the shim forced over its
+native WebRTC. Build the e2e app as above, then set `E2E_FORCE_SHIM=1` and point
+`CHROMIUM` at Google Chrome, which has H.264:
+
+```sh
+E2E_FORCE_SHIM=1 CHROMIUM="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" node shim-e2e.mjs --app $APP
+```
+
+The harnesses launch the app directly outside Linux, so no Xvfb is needed. This
+checks the shim, the engine and the browser interop, not WebKitGTK.
+
 ## Licence and compliance
 
 Licensed under either of Apache License 2.0 ([LICENSE-APACHE](LICENSE-APACHE))

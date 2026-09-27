@@ -1,0 +1,54 @@
+<!-- title: Matrix clients -->
+<!-- nav: Matrix clients -->
+<!-- order: 7 -->
+<h1>Matrix clients</h1>
+<p class="lead">The plugin was built for Matrix clients packaged with Tauri. Tchap, the French government's messenger, is the worked example: its whole integration is three small changes.</p>
+
+<h2>The Tchap integration</h2>
+<h3>1. Dependency, Linux only</h3>
+<pre><code># src-tauri/Cargo.toml
+[target.'cfg(target_os = "linux")'.dependencies]
+# WebKitGTK ships without WebRTC; the plugin supplies it through a native engine.
+# Pure Rust throughout: TURN over TLS with RustCrypto, and post-quantum key
+# agreement (X25519MLKEM768) with moduletto.
+tauri-plugin-webrtc = { git = "https://github.com/crabnebula-dev/tauri-plugin-webrtc", branch = "main",
+    default-features = false, features = ["turn-tls-rustcrypto", "pq-moduletto"] }</code></pre>
+<h3>2. Plugin, Linux only</h3>
+<pre><code>// src-tauri/src/lib.rs
+#[cfg(target_os = "linux")]
+{
+    builder = builder.plugin(tauri_plugin_webrtc::init());
+}</code></pre>
+<h3>3. Capability, Linux only</h3>
+<pre><code>// src-tauri/capabilities/linux.json
+{
+  "identifier": "linux-capability",
+  "platforms": ["linux"],
+  "windows": ["main"],
+  "permissions": ["webrtc:default"]
+}</code></pre>
+<p>No web code changes. The Element Web code inside Tchap sees <code>RTCPeerConnection</code> and enables calls.</p>
+
+<h2>What works</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Call type</th><th>Path</th><th>Tested</th></tr></thead>
+  <tbody>
+    <tr><td>1:1 voice and video</td><td>matrix-js-sdk <code>MatrixCall</code>, peer to peer or through TURN</td><td>The app and Chromium as two users on a Synapse fixture, calls in both directions with audio and video checked</td></tr>
+    <tr><td>Group calls</td><td>Element Call widget, LiveKit SFU</td><td>The app and Chromium in one LiveKit room, plain and with end-to-end encryption, also from an iframe</td></tr>
+    <tr><td>Screen share</td><td><code>getDisplayMedia</code> track on a sender</td><td>A screen-share renegotiation inside the 1:1 call test; sent at up to 1080p and 15 fps</td></tr>
+  </tbody>
+</table></div>
+<p>The harnesses drive Tchap builds that carry a small test hook; see <a href="testing.html">Testing</a>. A full manual check in the Element Web interface, with echo, controls and three-person Element Call rooms, is still open.</p>
+
+<h2>What matters to a Matrix client</h2>
+<ul>
+  <li><strong>msid.</strong> matrix-js-sdk keys its <code>sdp_stream_metadata</code> on the stream ids in <code>a=msid</code>. The engine writes the page's stream and track ids.</li>
+  <li><strong>Re-serialised descriptions.</strong> matrix-js-sdk rewrites every local description before setting it. The engine accepts that and refuses only structural edits.</li>
+  <li><strong>Perfect negotiation and glare.</strong> Implicit rollback resolves simultaneous offers.</li>
+  <li><strong>TURN from the homeserver.</strong> <code>/voip/turnServer</code> credentials work over UDP, TCP and TLS.</li>
+  <li><strong>End-to-end encryption.</strong> LiveKit's E2EE worker runs through <code>RTCRtpScriptTransform</code> in the Element Call iframe.</li>
+  <li><strong>Echo cancellation.</strong> The engine runs AEC3 against the mix it plays out, as a browser does. Its unit test removes a simulated echo; a check with real speakers and a room is part of the open manual check.</li>
+</ul>
+
+<h2>Other Tauri apps</h2>
+<p>Nothing here is specific to Matrix. Any page that uses the standard API works the same way: a LiveKit client, a WebRTC data channel app, or a SIP-over-WebSocket softphone that needs DTMF.</p>

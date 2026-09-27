@@ -1,0 +1,71 @@
+<!-- title: Architecture -->
+<!-- order: 3 -->
+<h1>Architecture</h1>
+<p class="lead">The page keeps capture, codecs and playback. The engine keeps the network, audio processing and the playout clock. Tauri IPC carries encoded video and PCM audio between them.</p>
+
+<figure>
+  <svg viewBox="0 0 760 520" role="img" aria-label="Architecture: app JavaScript, JS shim and in-page media, Tauri IPC, plugin core, qrtc engine, network">
+    <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead" d="M0 0L10 5L0 10z"/></marker></defs>
+    <text class="small" x="20" y="22">WebKitGTK webview</text>
+    <rect class="box" x="20" y="32" width="340" height="46" rx="8"/>
+    <text class="label" x="190" y="60" text-anchor="middle">App JavaScript (unchanged)</text>
+    <rect class="box main" x="20" y="110" width="340" height="62" rx="8"/>
+    <text class="label" x="190" y="136" text-anchor="middle" font-weight="600">JS shim</text>
+    <text class="small" x="190" y="156" text-anchor="middle">RTCPeerConnection, RTCDataChannel, transceivers</text>
+    <rect class="box" x="420" y="100" width="320" height="82" rx="8"/>
+    <text class="label" x="580" y="126" text-anchor="middle">In the page</text>
+    <text class="small" x="580" y="146" text-anchor="middle">getUserMedia (WebKitGTK)</text>
+    <text class="small" x="580" y="164" text-anchor="middle">WebCodecs VP8 and H.264, AudioWorklets</text>
+    <rect class="box" x="20" y="214" width="720" height="62" rx="8"/>
+    <text class="label" x="380" y="240" text-anchor="middle">Tauri IPC</text>
+    <text class="small" x="380" y="260" text-anchor="middle">invoke for commands and outgoing media; one ordered Channel per peer connection for events and incoming media</text>
+    <text class="small" x="20" y="306">Rust, in the app process</text>
+    <rect class="box" x="20" y="316" width="720" height="46" rx="8"/>
+    <text class="label" x="380" y="344" text-anchor="middle">Plugin core: peer connections per webview, torn down on navigation</text>
+    <rect class="box main" x="20" y="392" width="720" height="46" rx="8"/>
+    <text class="label" x="380" y="420" text-anchor="middle" font-weight="600">qrtc engine: ICE, DTLS, SRTP, SCTP, RTP, audio processing, Opus</text>
+    <rect class="box" x="220" y="466" width="320" height="40" rx="8"/>
+    <text class="label" x="380" y="491" text-anchor="middle">Network: peers, SFUs, STUN and TURN</text>
+    <path class="edge" d="M190 78V108" marker-end="url(#a)"/>
+    <path class="edge" d="M362 141H418" marker-end="url(#a)" marker-start="url(#a)"/>
+    <path class="edge" d="M190 172V212" marker-end="url(#a)" marker-start="url(#a)"/>
+    <path class="edge" d="M380 276V314" marker-end="url(#a)" marker-start="url(#a)"/>
+    <path class="edge" d="M380 362V390" marker-end="url(#a)" marker-start="url(#a)"/>
+    <path class="edge" d="M380 438V464" marker-end="url(#a)" marker-start="url(#a)"/>
+  </svg>
+  <figcaption>Only the shim is visible to the app. Camera and microphone permissions stay with the webview.</figcaption>
+</figure>
+
+<h2>The shim</h2>
+<p><code>guest-js/shim.js</code> is plain ES2020 with no dependencies. The plugin registers it as an initialization script on every frame, so it runs before page scripts. It installs itself only when the webview has no <code>RTCPeerConnection</code> of its own and the engine started.</p>
+<p>Every object the shim hands out is a handle to a resource in the engine. W3C state (signalling state, transceiver directions, data channel ready state) lives in the shim, and changes as the engine's events arrive. Engine errors come back as <code>DOMException</code>s with the W3C name.</p>
+
+<h2>IPC</h2>
+<ul>
+  <li><strong>Commands</strong> go through <code>invoke</code>: create, negotiate, add candidates, data channel operations, stats.</li>
+  <li><strong>Outgoing media</strong> goes through <code>invoke</code> as raw bytes: encoded video frames, and audio PCM in batches.</li>
+  <li><strong>Events and incoming media</strong> come back on one ordered channel per peer connection. Ordering matters: <code>icecandidate</code>, state changes, <code>datachannel</code> and messages must reach the page in the order the engine produced them.</li>
+</ul>
+
+<h2>How media flows</h2>
+<h3>Video</h3>
+<ol>
+  <li>The page captures frames from the track through a hidden <code>&lt;video&gt;</code>.</li>
+  <li>WebCodecs encodes them, VP8 or H.264, at the bitrate the engine's bandwidth estimate allows.</li>
+  <li>The engine packetizes, encrypts and sends them.</li>
+  <li>On receive, the engine reassembles frames and sends them to the page.</li>
+  <li>WebCodecs decodes them into a canvas. The canvas's <code>captureStream()</code> is the remote track.</li>
+</ol>
+<p>Camera tracks send at up to 1280×720 and 30 fps. Screen tracks, recognised by <code>displaySurface</code> or a <code>detail</code> or <code>text</code> content hint, send at up to 1920×1080 and 15 fps, with a bitrate of at least 1.5 Mbps. Keyframe requests from the far side reach the encoder.</p>
+
+<h3>Audio</h3>
+<ol>
+  <li>An AudioWorklet takes 48 kHz PCM from the microphone track and sends it to the engine.</li>
+  <li>The engine runs echo cancellation, noise suppression and AGC, then Opus with in-band FEC.</li>
+  <li>Received audio goes through a jitter buffer and one playout clock for all receivers.</li>
+  <li>PCM comes back to an AudioWorklet that feeds the remote track.</li>
+</ol>
+<p>The echo canceller needs the audio being played as its reference, which is why audio is processed in the engine rather than in the page.</p>
+
+<h2>The engine</h2>
+<p><a href="https://crabnebula-dev.github.io/qrtc/">qrtc</a> is a separate crate. Its site covers the <a href="https://crabnebula-dev.github.io/qrtc/architecture.html">driver design</a>, the <a href="https://crabnebula-dev.github.io/qrtc/features.html">features in depth</a> and the <a href="https://crabnebula-dev.github.io/qrtc/patches.html">vendored str0m and DTLS patches</a>. The plugin talks to it through the <code>PeerEngine</code> and <code>Peer</code> traits, so <code>Builder::engine</code> can put another implementation behind the same shim.</p>

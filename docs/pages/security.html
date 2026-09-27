@@ -1,0 +1,31 @@
+<!-- title: Security and compliance -->
+<!-- nav: Security and compliance -->
+<!-- order: 9 -->
+<h1>Security and compliance</h1>
+<p class="lead">tauri-plugin-webrtc is licensed under either Apache License 2.0 or MIT, at your option. CrabNebula stewards it as free and open-source software. <a href="https://github.com/crabnebula-dev/tauri-plugin-webrtc/blob/main/COMPLIANCE.md">COMPLIANCE.md</a> is the authoritative statement.</p>
+
+<h2>Licence</h2>
+<p><code>MIT OR Apache-2.0</code>, the usual dual licence of the Rust and Tauri ecosystems. The texts are in <code>LICENSE-MIT</code> and <code>LICENSE-APACHE</code>. qrtc and its vendored crates are licensed the same way.</p>
+
+<h2>What the plugin exposes</h2>
+<ul>
+  <li><strong>Only windows you grant.</strong> The commands are reachable only from windows whose capability includes <code>webrtc:default</code> or one of its sets.</li>
+  <li><strong>No capture.</strong> The permissions cover networking and media transport. Camera, microphone and screen capture stay under the webview's own <code>getUserMedia</code> permission handling.</li>
+  <li><strong>No cross-origin frames.</strong> The shim reaches IPC only from the top document or a same-origin frame.</li>
+  <li><strong>Bounded.</strong> At most 16 peer connections per webview by default, all closed when the page navigates or the window closes.</li>
+  <li><strong>No <code>unsafe</code></strong> code of the plugin's own.</li>
+</ul>
+
+<h2>Cyber Resilience Act</h2>
+<p>CrabNebula supplies the plugin outside any commercial activity, so under Regulation (EU) 2024/2847 it acts as an open-source software steward (Article 3(14)), not as a manufacturer. The steward obligations of Article 24 apply to it.</p>
+<p>An app that ships the plugin in a product on the market is that product's manufacturer. It must exercise due diligence on the plugin and on qrtc as components (Article 13(5)). The two COMPLIANCE.md files carry the facts that due diligence needs.</p>
+
+<h2>Supply chain</h2>
+<ul>
+  <li><code>sbom/tauri-plugin-webrtc.cdx.json</code>: CycloneDX 1.5 SBOM of the plugin with its default features.</li>
+  <li>The engine's advisories, SBOM drift and interop checks run in <a href="https://crabnebula-dev.github.io/qrtc/security.html">qrtc's CI</a>.</li>
+  <li>Commits and releases are signed.</li>
+</ul>
+
+<h2>Reporting a vulnerability</h2>
+<p>Use GitHub's private vulnerability reporting on the repository (Security tab, "Report a vulnerability"). Please do not open a public issue. A vulnerability in the engine can go to either repository.</p>

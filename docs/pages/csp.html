@@ -1,0 +1,28 @@
+<!-- title: CSP and frames -->
+<!-- nav: CSP and frames -->
+<!-- order: 6 -->
+<h1>CSP and frames</h1>
+<p class="lead">The shim works under a strict Content Security Policy and in same-origin iframes, with one feature lost when <code>blob:</code> scripts are forbidden.</p>
+
+<h2>Content Security Policy</h2>
+<p>The shim loads two pieces of code from <code>blob:</code> URLs: its AudioWorklet, and a polyfill that it wraps around workers so <code>RTCRtpScriptTransform</code> works. At startup it probes whether the page's CSP allows <code>blob:</code> scripts.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th><code>script-src</code></th><th>Audio</th><th>Encoded transforms</th></tr></thead>
+  <tbody>
+    <tr><td>Allows <code>blob:</code>, or no CSP</td><td>AudioWorklets</td><td><code>RTCRtpScriptTransform</code> available</td></tr>
+    <tr><td>Forbids <code>blob:</code></td><td><code>ScriptProcessorNode</code>s with the same logic</td><td><code>RTCRtpScriptTransform</code> withdrawn, <code>Worker</code> left unwrapped</td></tr>
+  </tbody>
+</table></div>
+<p>Withdrawing the class is deliberate. A library that feature-detects <code>RTCRtpScriptTransform</code> then takes its fallback path, instead of sending media into a worker that cannot load.</p>
+<p>To keep encoded transforms, add <code>blob:</code> to <code>script-src</code> and <code>worker-src</code>, or run the call in a document whose policy allows it.</p>
+
+<h2>Frames</h2>
+<ul>
+  <li><strong>Top-level documents</strong> get the shim.</li>
+  <li><strong>Same-origin iframes</strong> get it too. They have no Tauri IPC of their own, so the shim uses the nearest same-origin ancestor's.</li>
+  <li><strong>Cross-origin frames</strong> get nothing. They cannot reach the app's IPC, and the plugin grants none.</li>
+</ul>
+<p>This is what Element Call needs. The Matrix client embeds it as a same-origin widget iframe with its own, laxer CSP. Group calls there keep end-to-end encryption even when the main window's CSP forbids <code>blob:</code>, as Tchap's does.</p>
+
+<h2>Navigation</h2>
+<p>When a page starts loading, every peer connection that webview created is closed. A reload or navigation never leaves a call running without a page.</p>

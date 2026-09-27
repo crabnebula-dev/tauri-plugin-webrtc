@@ -1,0 +1,44 @@
+<!-- title: Testing -->
+<!-- order: 8 -->
+<h1>Testing</h1>
+<p class="lead">The plugin is tested end to end: a real Tauri app on WebKitGTK, with the shim, talks to real browsers, SFUs, homeservers and TURN servers. The engine's own tests and CI live in <a href="https://crabnebula-dev.github.io/qrtc/testing.html">qrtc</a>.</p>
+
+<h2>The suites</h2>
+<p>Each harness in <code>tests/</code> starts <code>examples/e2e-app</code>, a Tauri app built the way Tchap builds its window, and drives it with standard web APIs only. Chromium, through Playwright, is the other side unless noted.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Harness</th><th>What it proves</th><th>Needs</th></tr></thead>
+  <tbody>
+    <tr><td><code>shim-e2e.mjs</code></td><td>Data channels, video and audio both ways, with the app as offerer and as answerer. <code>--page index-csp.html</code> repeats it under Tchap's CSP; <code>--mdns</code> uses mDNS candidates.</td><td>Chromium</td></tr>
+    <tr><td><code>livekit-e2e.mjs</code></td><td>The app and Chromium join one LiveKit room, publish a tone and a marked video, and each hears and sees the other. Plain and with E2EE; <code>--iframe</code> runs it in a same-origin iframe, as Element Call does.</td><td><code>livekit-server</code></td></tr>
+    <tr><td><code>matrix-e2e.mjs</code></td><td>Two users on a homeserver call each other with the real matrix-js-sdk, in both directions, including a screen-share renegotiation.</td><td>Synapse (<code>SYNAPSE_PY</code>)</td></tr>
+    <tr><td><code>h264-e2e.mjs</code></td><td>H.264 only, between two app instances; each decodes the other.</td><td>A GStreamer H.264 encoder</td></tr>
+    <tr><td><code>turn-e2e.mjs</code></td><td>Relay-only candidates through coturn over UDP, TCP and TLS, then a data channel.</td><td><code>turnserver</code>, <code>openssl</code></td></tr>
+  </tbody>
+</table></div>
+<p>The bundled Playwright Chromium has no H.264. For H.264 with a browser, run <code>shim-e2e.mjs</code> with <code>CHROMIUM</code> set to Google Chrome.</p>
+
+<h2>Running them</h2>
+<pre><code># The TURN harness uses qrtc's stdio_peer, from a checkout next to this one
+(cd ../qrtc &amp;&amp; cargo build --example stdio_peer)
+
+cd tests &amp;&amp; npm install
+node matrix/build.mjs
+mkdir -p ../examples/e2e-app/dist/lk
+cp node_modules/livekit-client/dist/livekit-client.{umd.js,e2ee.worker.mjs} ../examples/e2e-app/dist/lk/
+cargo build --release -p e2e-app
+APP=../target/release/e2e-app
+
+node shim-e2e.mjs --app $APP
+node shim-e2e.mjs --app $APP --page index-csp.html
+node livekit-e2e.mjs --app $APP
+node livekit-e2e.mjs --app $APP --iframe
+node matrix-e2e.mjs --app $APP
+node h264-e2e.mjs --app $APP
+node turn-e2e.mjs</code></pre>
+<p>The harnesses start the app under <code>xvfb-run</code>, so they need Xvfb but no display. Each exits non-zero when a check fails.</p>
+
+<h2>Testing your own app</h2>
+<p>The harnesses also drive a Tchap build that carries a small, test-only hook: pass it as <code>--app</code>, and add <code>--tchap</code> to the LiveKit and Matrix tests. The hook connects the app to the harness's WebSocket so scenarios can run inside it. Build it into test builds only.</p>
+
+<h2>Known flakes</h2>
+<p>The LiveKit iframe case failed once in fifteen runs: Chromium heard the app's tone about 27 dB below normal. The fourteen reruns passed, and the cause is not yet known.</p>

@@ -6,6 +6,10 @@ only when the webview lacks native WebRTC. A pure Rust engine sits behind it: no
 GStreamer WebRTC elements, no libwebrtc, no system packages beyond what WebKitGTK
 already needs.
 
+Documentation: <https://crabnebula-dev.github.io/tauri-plugin-webrtc/>, with
+setup, the Web APIs the shim provides, post-quantum options, CSP behaviour,
+the Tchap integration and the API reference.
+
 The target is a Matrix client such as [Tchap](https://github.com/tchapgouv/tchap-desktop):
 1:1 calls through matrix-js-sdk, and group calls through Element Call on LiveKit,
 with end-to-end encryption.
@@ -58,7 +62,7 @@ closes.
 | Simulcast | Send side sends one layer, the best active encoding |
 | DTMF | `RTCDTMFSender`: `insertDTMF`, `toneBuffer`, `tonechange`, sent as RFC 4733 telephone events |
 | Encoded transforms | `RTCRtpScriptTransform` (LiveKit E2EE), audio and video, send and receive |
-| Stats | `getStats()` with candidate pairs, `inbound-rtp` and `outbound-rtp`; the transport reports `tlsGroup` for post-quantum DTLS |
+| Stats | `getStats()` with candidate pairs and candidates from the engine, `inbound-rtp` and `outbound-rtp` from the shim; the transport reports `tlsGroup` for post-quantum DTLS |
 | Post-quantum | X25519MLKEM768 for DTLS 1.3 and TURN over TLS, on by default (see below) |
 | Not yet | VP9 and AV1, receive-side simulcast layers |
 

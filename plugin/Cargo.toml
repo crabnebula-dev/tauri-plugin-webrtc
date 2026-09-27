@@ -19,12 +19,12 @@ log.workspace = true
 tauri-plugin = { version = "2", features = ["build"] }
 
 [features]
-default = ["turn-tls-ring"]
+default = ["turn-tls-ring", "pq-moduletto"]
 # TURN over TLS (turns:) with ring (compiles C and assembly).
 turn-tls-ring = ["tauri-webrtc-engine/turn-tls-ring"]
 # TURN over TLS with the pure-Rust RustCrypto provider (pre-release).
 turn-tls-rustcrypto = ["tauri-webrtc-engine/turn-tls-rustcrypto"]
 # Post-quantum key agreement (X25519MLKEM768) for DTLS 1.3 and TURN over TLS,
-# with RustCrypto ml-kem or with moduletto. See the engine manifest.
+# with moduletto (default) or RustCrypto ml-kem. See the engine manifest.
 pq-hybrid = ["tauri-webrtc-engine/pq-hybrid"]
 pq-moduletto = ["tauri-webrtc-engine/pq-moduletto"]

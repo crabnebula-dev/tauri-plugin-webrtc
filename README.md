@@ -37,7 +37,7 @@ WebRTC too. Cross-origin frames get nothing.
 | DTMF | `RTCDTMFSender`: `insertDTMF`, `toneBuffer`, `tonechange`, sent as RFC 4733 telephone events |
 | Encoded transforms | `RTCRtpScriptTransform` (LiveKit E2EE), audio and video, send and receive |
 | Stats | `getStats()` with candidate pairs, `inbound-rtp` and `outbound-rtp`; the transport reports `tlsGroup` for post-quantum DTLS |
-| Post-quantum | Optional (features below): X25519MLKEM768 for DTLS 1.3 and TURN over TLS |
+| Post-quantum | X25519MLKEM768 for DTLS 1.3 and TURN over TLS, on by default (see below) |
 | Not yet | VP9 and AV1, receive-side simulcast layers |
 
 ### How media flows
@@ -51,12 +51,13 @@ WebRTC too. Cross-origin frames get nothing.
 
 ### Post-quantum key agreement
 
-Two Cargo features add hybrid post-quantum key agreement. Both are pure Rust and
-differ only in the ML-KEM implementation:
+Hybrid post-quantum key agreement comes from one of two Cargo features. Both are
+pure Rust and differ only in the ML-KEM implementation:
 
-- `pq-hybrid`: RustCrypto [ml-kem](https://crates.io/crates/ml-kem);
-- `pq-moduletto`: [moduletto](https://github.com/crabnebula-dev/moduletto),
-  which also adds ML-KEM-512 groups for engine-to-engine use.
+- `pq-moduletto` (default): [moduletto](https://github.com/crabnebula-dev/moduletto),
+  which also adds ML-KEM-512 groups for engine-to-engine use;
+- `pq-hybrid`: RustCrypto [ml-kem](https://crates.io/crates/ml-kem)
+  (`default-features = false, features = ["pq-hybrid", …]`).
 
 A connection opts in with the non-W3C `postQuantum` member of its configuration:
 
@@ -67,7 +68,7 @@ new RTCPeerConnection({ iceServers, postQuantum: 'prefer' }); // 'off' | 'prefer
 | Policy | DTLS (media and data channels) | TURN over TLS |
 | --- | --- | --- |
 | `off` | DTLS 1.2, classical groups | classical groups |
-| `prefer` (default with a pq feature) | DTLS 1.3 with X25519MLKEM768 when the peer supports it, otherwise DTLS 1.2 | X25519MLKEM768 first, classical groups after |
+| `prefer` (default) | DTLS 1.3 with X25519MLKEM768 when the peer supports it, otherwise DTLS 1.2 | X25519MLKEM768 first, classical groups after |
 | `require` | DTLS 1.3 with post-quantum groups only; other peers fail to connect | TLS 1.3 with post-quantum groups only |
 
 Browsers do not negotiate post-quantum DTLS by default yet. Chromium 141 with its

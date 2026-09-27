@@ -14,7 +14,7 @@
     ],
     "component": {
       "type": "library",
-      "bom-ref": "path+file:///home/claude/work/tauri-plugin-webrtc/plugin#tauri-plugin-webrtc@0.1.0",
+      "bom-ref": "path+file:///tauri-plugin-webrtc/plugin#tauri-plugin-webrtc@0.1.0",
       "name": "tauri-plugin-webrtc",
       "version": "0.1.0",
       "description": "WebRTC for Tauri on Linux via a standards-shaped JS shim over a pure Rust engine",
@@ -34,7 +34,7 @@
       "components": [
         {
           "type": "library",
-          "bom-ref": "path+file:///home/claude/work/tauri-plugin-webrtc/plugin#tauri-plugin-webrtc@0.1.0 bin-target-0",
+          "bom-ref": "path+file:///tauri-plugin-webrtc/plugin#tauri-plugin-webrtc@0.1.0 bin-target-0",
           "name": "tauri_plugin_webrtc",
           "version": "0.1.0",
           "purl": "pkg:cargo/tauri-plugin-webrtc@0.1.0?download_url=file://.#src/lib.rs"
@@ -11712,7 +11712,7 @@
       ]
     },
     {
-      "ref": "path+file:///home/claude/work/tauri-plugin-webrtc/plugin#tauri-plugin-webrtc@0.1.0",
+      "ref": "path+file:///tauri-plugin-webrtc/plugin#tauri-plugin-webrtc@0.1.0",
       "dependsOn": [
         "registry+https://github.com/rust-lang/crates.io-index#log@0.4.34",
         "git+https://github.com/crabnebula-dev/qrtc?branch=main#0.1.0",

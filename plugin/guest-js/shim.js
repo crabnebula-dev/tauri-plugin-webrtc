@@ -788,10 +788,61 @@
   const VIDEO_CAPS = { codecs: [{ mimeType: 'video/VP8', clockRate: 90000 }, { mimeType: 'video/rtx', clockRate: 90000 }], headerExtensions: [] };
   const capabilities = (kind) => (kind === 'audio' ? structuredClone(AUDIO_CAPS) : kind === 'video' ? structuredClone(VIDEO_CAPS) : null);
 
+  class RTCDTMFToneChangeEvent extends Event {
+    constructor(type, init = {}) { super(type, init); this.tone = init.tone ?? ''; }
+  }
+  const DTMF_EVENT = { 0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, '*': 10, '#': 11, A: 12, B: 13, C: 14, D: 15 };
+  // Whether the answer negotiated telephone-event on this m-line.
+  function negotiatedDtmf(pc, mid) {
+    const answer = [pc._currentLocal, pc._currentRemote].find((d) => d && d.type === 'answer');
+    if (!answer || mid == null) return false;
+    const sec = answer.sdp.split(/\r?\nm=/).map((x) => x.split(/\r?\n/)).find((lines) => lines.includes(`a=mid:${mid}`));
+    return !!sec && sec.some((l) => /^a=rtpmap:\d+ telephone-event\//i.test(l));
+  }
+
   class RTCDTMFSender extends EventTarget {
-    constructor() { super(); this.toneBuffer = ''; }
-    get canInsertDTMF() { return false; }
-    insertDTMF() { throw new DOMException('DTMF is not supported yet', 'InvalidStateError'); }
+    constructor(sender) { super(); this._sender = sender; this._buffer = ''; this._duration = 100; this._gap = 70; this._running = false; this._timer = null; }
+    get toneBuffer() { return this._buffer; }
+    get canInsertDTMF() {
+      const tx = this._sender._tx;
+      const cur = tx._currentDirection;
+      return !tx._stopping && !tx._pc._closed && !!this._sender.track && (cur === 'sendrecv' || cur === 'sendonly') && negotiatedDtmf(tx._pc, tx._mid);
+    }
+    insertDTMF(tones, duration = 100, interToneGap = 70) {
+      const tx = this._sender._tx;
+      // Steps 3-4: a stopped transceiver or a sender that cannot send DTMF.
+      if (tx._stopping) throw new DOMException('transceiver is stopped', 'InvalidStateError');
+      if (!this.canInsertDTMF) throw new DOMException('cannot insert DTMF', 'InvalidStateError');
+      tones = String(tones);
+      // Step 6: only 0-9, A-D, #, * and the pause ",".
+      if (/[^0-9A-D#*,]/i.test(tones)) throw new DOMException('invalid DTMF tone', 'InvalidCharacterError');
+      this._buffer = tones.toUpperCase();
+      this._duration = Math.min(6000, Math.max(40, Number(duration) | 0 || 100));
+      this._gap = Math.min(6000, Math.max(30, Number(interToneGap) | 0 || 70));
+      if (this._buffer === '') return; // step 10 keeps a running task, which then ends
+      if (!this._running) { this._running = true; this._timer = setTimeout(() => this._playout(), 0); }
+    }
+    // The "playout task" of the specification.
+    _playout() {
+      const tx = this._sender._tx;
+      if (tx._stopping || tx._pc._closed) { this._running = false; return; }
+      if (this._buffer === '') {
+        this._running = false;
+        this.dispatchEvent(new RTCDTMFToneChangeEvent('tonechange', { tone: '' }));
+        return;
+      }
+      const tone = this._buffer[0];
+      this._buffer = this._buffer.slice(1);
+      if (tone === ',') {
+        this._timer = setTimeout(() => this._playout(), 2000);
+      } else {
+        const duration = this._duration;
+        tx._pc._id.then((id) => invoke('pc_insert_dtmf', { id, tx: tx._id, event: DTMF_EVENT[tone], durationMs: duration })).catch(() => {});
+        this._timer = setTimeout(() => this._playout(), duration + this._gap);
+      }
+      this.dispatchEvent(new RTCDTMFToneChangeEvent('tonechange', { tone }));
+    }
+    _stop() { clearTimeout(this._timer); this._running = false; this._buffer = ''; }
   }
   defineHandlers(RTCDTMFSender.prototype, ['tonechange']);
 
@@ -799,7 +850,7 @@
     constructor(tx, track) {
       this._tx = tx; this.track = track || null; this.transport = null; this.rtcpTransport = null;
       this._everSent = !!track;
-      this.dtmf = tx.kind === 'audio' ? new RTCDTMFSender() : null;
+      this.dtmf = tx.kind === 'audio' ? new RTCDTMFSender(this) : null;
       this._params = { transactionId: '', encodings: [{ active: true }], codecs: [], headerExtensions: [], rtcp: { cname: '', reducedSize: true }, degradationPreference: 'balanced' };
       this._pipe = null;
     }
@@ -914,6 +965,7 @@
       if (this._stopping) return;
       this._stopping = true;
       if (this.sender._pipe) this.sender._pipe.stop();
+      if (this.sender.dtmf) this.sender.dtmf._stop();
       this.sender.track = null;
       this.receiver._pipe.stop();
       this._pc._removeRemoteTrack(this);
@@ -1443,7 +1495,7 @@
   const expose = {
     RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, RTCDataChannel,
     RTCPeerConnectionIceEvent, RTCDataChannelEvent, RTCTrackEvent,
-    RTCRtpSender, RTCRtpReceiver, RTCRtpTransceiver, RTCDTMFSender, RTCRtpScriptTransform,
+    RTCRtpSender, RTCRtpReceiver, RTCRtpTransceiver, RTCDTMFSender, RTCDTMFToneChangeEvent, RTCRtpScriptTransform,
   };
   if (TauriWorker) expose.Worker = TauriWorker;
   for (const [name, value] of Object.entries(expose)) {

@@ -371,6 +371,21 @@ async fn pc_upsert_transceiver<R: Runtime>(
 }
 
 #[tauri::command]
+async fn pc_insert_dtmf<R: Runtime>(
+    webview: Webview<R>,
+    state: State<'_, WebrtcState>,
+    id: u32,
+    tx: TxId,
+    event: u8,
+    duration_ms: u32,
+) -> CmdResult<()> {
+    state
+        .peer(webview.label(), id)?
+        .insert_dtmf(tx, event, duration_ms)
+        .map_err(DomError::from)
+}
+
+#[tauri::command]
 async fn pc_set_transform<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, WebrtcState>,
@@ -617,6 +632,7 @@ impl Builder {
                 pc_upsert_transceiver,
                 pc_request_keyframe,
                 pc_set_transform,
+                pc_insert_dtmf,
                 pc_audio_processing,
                 pc_restart_ice,
                 media_push,

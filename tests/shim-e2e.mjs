@@ -95,6 +95,13 @@ try {
   answer = run('webkit', 'audio', { offer: false, freq: 440, expect: 660 });
   results.audioChromiumOffers = await run('chromium', 'audio', { offer: true, freq: 660, expect: 440 });
   results.audioChromiumOffersWebkitSide = await answer;
+  // DTMF both ways; each side sends different tones, the shim side checks what arrived.
+  answer = run('chromium', 'dtmf', { offer: false, tones: '90#', expect: '1A*' });
+  results.dtmfWebkitOffers = await run('webkit', 'dtmf', { offer: true, tones: '1A,*', expect: '90#' });
+  results.dtmfWebkitOffersChromiumSide = await answer;
+  answer = run('webkit', 'dtmf', { offer: false, tones: '7B', expect: '58D' });
+  results.dtmfChromiumOffers = await run('chromium', 'dtmf', { offer: true, tones: '58D', expect: '7B' });
+  results.dtmfChromiumOffersWebkitSide = await answer;
   const c = results.conformance;
   const conformanceOk = c.createAnswerInStable === 'InvalidStateError' && c.addTrack === 'TypeError'
     && c.addIceNoRemote === 'InvalidStateError' && c.sendBeforeOpen === 'InvalidStateError'
@@ -108,6 +115,8 @@ try {
     mediaChromiumOffers: results.mediaChromiumOffers.ok && results.mediaChromiumOffersWebkitSide.ok,
     audioWebkitOffers: results.audioWebkitOffers.ok && results.audioWebkitOffersChromiumSide.ok,
     audioChromiumOffers: results.audioChromiumOffers.ok && results.audioChromiumOffersWebkitSide.ok,
+    dtmfWebkitOffers: results.dtmfWebkitOffers.ok && results.dtmfWebkitOffersChromiumSide.ok,
+    dtmfChromiumOffers: results.dtmfChromiumOffers.ok && results.dtmfChromiumOffersWebkitSide.ok,
   };
   exitCode = Object.values(results.summary).every(Boolean) ? 0 : 1;
 } catch (e) {

@@ -1,0 +1,44 @@
+<!-- title: Post-quantum key agreement -->
+<!-- nav: Post-quantum -->
+<!-- order: 5 -->
+<h1>Post-quantum key agreement</h1>
+<p class="lead">Calls from a Tauri app agree their keys with hybrid X25519MLKEM768 whenever the other side supports it. A page chooses per connection how strict to be.</p>
+
+<h2>The postQuantum option</h2>
+<pre><code>new RTCPeerConnection({ iceServers, postQuantum: 'prefer' }); // 'off' | 'prefer' | 'require'</code></pre>
+<p>The member is not W3C. Browsers ignore it, so the same page code runs everywhere.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Policy</th><th>Media and data channels (DTLS)</th><th>TURN over TLS</th></tr></thead>
+  <tbody>
+    <tr><td><code>off</code></td><td>DTLS 1.2, classical groups</td><td>Classical groups</td></tr>
+    <tr><td><code>prefer</code> (default)</td><td>DTLS 1.3 with X25519MLKEM768 when the peer supports it, DTLS 1.2 otherwise</td><td>X25519MLKEM768 first, classical groups after</td></tr>
+    <tr><td><code>require</code></td><td>DTLS 1.3 with post-quantum groups only; other peers fail to connect</td><td>TLS 1.3 with post-quantum groups only</td></tr>
+  </tbody>
+</table></div>
+<p>The default is <code>prefer</code> when the plugin is built with <code>pq-moduletto</code> or <code>pq-hybrid</code>, which is the default build. Without either, a policy other than <code>off</code> makes the connection's methods reject with <code>NotSupportedError</code>.</p>
+
+<h2>What the other side needs</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Other side</th><th>Under <code>prefer</code></th></tr></thead>
+  <tbody>
+    <tr><td>Another app with this plugin, or any qrtc peer</td><td>X25519MLKEM768 over DTLS 1.3</td></tr>
+    <tr><td>Chromium 141 with the <code>WebRTC-ForceDtls13</code> and <code>WebRTC-EnableDtlsPqc</code> field trials</td><td>X25519MLKEM768 over DTLS 1.3</td></tr>
+    <tr><td>Browsers with default settings, and SFUs such as LiveKit</td><td>DTLS 1.2, classical</td></tr>
+    <tr><td>A TURN server on OpenSSL 3.5 or later (coturn built against it, for example)</td><td>X25519MLKEM768 for the TLS connection to the server</td></tr>
+  </tbody>
+</table></div>
+<p>With an SFU, each leg is negotiated separately: the app to the SFU, and the SFU to every other participant. A post-quantum leg protects only its own hop. LiveKit's end-to-end encryption still protects the media across the SFU, with keys that Matrix distributes.</p>
+
+<h2>Checking what was agreed</h2>
+<pre><code>const stats = await pc.getStats();
+for (const s of stats.values()) if (s.type === 'transport') console.log(s.tlsGroup); // "X25519MLKEM768"</code></pre>
+<p><code>tlsGroup</code> is absent after a classical DTLS 1.2 handshake.</p>
+
+<h2>Choosing a policy</h2>
+<ul>
+  <li><code>prefer</code> suits calls with arbitrary peers. It never breaks a call that would work without it.</li>
+  <li><code>require</code> suits closed deployments where every peer and TURN server is known to support the hybrid. A peer without it fails to connect, after the ICE and DTLS timeouts.</li>
+  <li><code>off</code> reproduces a classical browser exactly, for comparison or debugging.</li>
+</ul>
+
+<div class="note">Only the key exchange is post-quantum. Peers still authenticate with ECDSA certificates whose fingerprints travel in the signalling. The <a href="https://crabnebula-dev.github.io/qrtc/post-quantum.html">qrtc post-quantum page</a> covers the groups and the DTLS changes behind them.</div>

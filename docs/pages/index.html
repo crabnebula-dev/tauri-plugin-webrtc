@@ -1,0 +1,54 @@
+<!-- title: Overview -->
+<!-- order: 1 -->
+<h1>tauri-plugin-webrtc</h1>
+<p class="lead">WebRTC for Tauri apps on Linux, without CEF. WebKitGTK ships no <code>RTCPeerConnection</code>. This plugin gives the page one, backed by <a href="https://crabnebula-dev.github.io/qrtc/">qrtc</a>, a pure Rust engine with post-quantum key agreement.</p>
+
+<div class="cards">
+  <div class="card"><strong>Unchanged app code</strong><span>A standards-shaped JS shim installs the W3C classes before page scripts run. matrix-js-sdk, LiveKit and plain WebRTC code work as they are.</span></div>
+  <div class="card"><strong>No system packages</strong><span>No GStreamer WebRTC elements, no libwebrtc. Nothing beyond what WebKitGTK already needs.</span></div>
+  <div class="card"><strong>Post-quantum by default</strong><span>DTLS 1.3 and TURN over TLS with X25519MLKEM768 whenever the other side supports it.</span></div>
+  <div class="card"><strong>Built for Matrix</strong><span>1:1 calls through matrix-js-sdk, and Element Call group calls on LiveKit with end-to-end encryption.</span></div>
+</div>
+
+<h2>Three steps</h2>
+<pre><code># src-tauri/Cargo.toml
+[target.'cfg(target_os = "linux")'.dependencies]
+tauri-plugin-webrtc = { git = "https://github.com/crabnebula-dev/tauri-plugin-webrtc", branch = "main" }</code></pre>
+<pre><code>// src-tauri/src/lib.rs
+#[cfg(target_os = "linux")]
+{
+    builder = builder.plugin(tauri_plugin_webrtc::init());
+}</code></pre>
+<pre><code>// src-tauri/capabilities/linux.json
+{
+  "identifier": "linux-capability",
+  "platforms": ["linux"],
+  "windows": ["main"],
+  "permissions": ["webrtc:default"]
+}</code></pre>
+<p>That is all. <code>new RTCPeerConnection()</code> in the page now works. <a href="setup.html">Setup</a> covers the options.</p>
+
+<h2>What the page gets</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Area</th><th>Coverage</th></tr></thead>
+  <tbody>
+    <tr><td>Peer connections</td><td>Offers, answers, renegotiation, rollback and perfect negotiation, <code>restartIce()</code>, <code>getStats()</code></td></tr>
+    <tr><td>ICE</td><td>Host, mDNS <code>.local</code>, STUN, TURN over UDP, TCP and TLS, relay-only policy</td></tr>
+    <tr><td>Data channels</td><td>Reliable and unreliable, ordered and unordered, negotiated ids, <code>bufferedAmount</code> events</td></tr>
+    <tr><td>Media</td><td>Opus with echo cancellation, noise suppression and AGC; VP8 and H.264 through WebCodecs; screen share; DTMF</td></tr>
+    <tr><td>Transforms</td><td><code>RTCRtpScriptTransform</code>, as LiveKit end-to-end encryption uses it</td></tr>
+  </tbody>
+</table></div>
+<p><a href="web-apis.html">Web APIs</a> lists every class and its limits.</p>
+
+<h2>Where to go next</h2>
+<ul>
+  <li><a href="setup.html">Setup</a>: dependency, features, builder options, permissions.</li>
+  <li><a href="architecture.html">Architecture</a>: the shim, IPC, the engine, and how media flows.</li>
+  <li><a href="web-apis.html">Web APIs</a>: what the shim implements, class by class.</li>
+  <li><a href="post-quantum.html">Post-quantum</a>: the <code>postQuantum</code> option and what the other side needs.</li>
+  <li><a href="csp.html">CSP and frames</a>: behaviour under a strict Content Security Policy and in iframes.</li>
+  <li><a href="matrix.html">Matrix clients</a>: the Tchap integration as a worked example.</li>
+  <li><a href="testing.html">Testing</a>: the end-to-end suites and how to run them.</li>
+  <li><a href="security.html">Security and compliance</a>: licence, CRA status, supply chain.</li>
+</ul>

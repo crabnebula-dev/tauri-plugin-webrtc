@@ -1,0 +1,69 @@
+<!-- title: Setup -->
+<!-- order: 2 -->
+<h1>Setup</h1>
+<p class="lead">Add the crate for Linux, register the plugin, and grant <code>webrtc:default</code> to the windows that make calls.</p>
+
+<h2>Dependency</h2>
+<p>Depend on the plugin for Linux only. On macOS and Windows the webview has native WebRTC, and the plugin has no engine there.</p>
+<pre><code>[target.'cfg(target_os = "linux")'.dependencies]
+tauri-plugin-webrtc = { git = "https://github.com/crabnebula-dev/tauri-plugin-webrtc", branch = "main" }</code></pre>
+
+<h3>Features</h3>
+<p>The plugin's features forward to qrtc's.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Feature</th><th>Default</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>turn-tls-ring</code></td><td>yes</td><td>TURN over TLS (<code>turns:</code>) with rustls on ring, which compiles C and assembly</td></tr>
+    <tr><td><code>turn-tls-rustcrypto</code></td><td>no</td><td>TURN over TLS with rustls on RustCrypto; pure Rust, pre-release provider</td></tr>
+    <tr><td><code>pq-moduletto</code></td><td>yes</td><td>Post-quantum key agreement with moduletto ML-KEM</td></tr>
+    <tr><td><code>pq-hybrid</code></td><td>no</td><td>Post-quantum key agreement with RustCrypto ml-kem</td></tr>
+  </tbody>
+</table></div>
+<p>A build with no C at all:</p>
+<pre><code>tauri-plugin-webrtc = { git = "https://github.com/crabnebula-dev/tauri-plugin-webrtc", branch = "main",
+    default-features = false, features = ["turn-tls-rustcrypto", "pq-moduletto"] }</code></pre>
+<p>Without a TLS feature, <code>turns:</code> servers are skipped. Without a post-quantum feature, DTLS stays at 1.2 and <code>postQuantum</code> other than <code>"off"</code> fails.</p>
+
+<h2>Registering the plugin</h2>
+<pre><code>#[cfg(target_os = "linux")]
+{
+    builder = builder.plugin(tauri_plugin_webrtc::init());
+}</code></pre>
+<p><code>init()</code> uses the defaults. For other settings, use the builder:</p>
+<pre><code>builder.plugin(
+    tauri_plugin_webrtc::Builder::new()
+        .max_peers_per_webview(8)
+        .build(),
+)</code></pre>
+<div class="table-wrap"><table>
+  <thead><tr><th>Option</th><th>Default</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>max_peers_per_webview(n)</code></td><td>16</td><td>Cap on concurrent peer connections per webview. Past the cap, the new connection's methods reject with an <code>OperationError</code>.</td></tr>
+    <tr><td><code>force_shim(true)</code></td><td>off</td><td>Installs the shim even over a native <code>RTCPeerConnection</code>. For testing the shim in a webview that has WebRTC.</td></tr>
+    <tr><td><code>engine(arc)</code></td><td>qrtc</td><td>Any other implementation of qrtc's <code>PeerEngine</code> trait.</td></tr>
+  </tbody>
+</table></div>
+<p>If the engine cannot start, the plugin logs a warning and the shim stays out, so the page sees no WebRTC rather than a broken one.</p>
+
+<h2>Permissions</h2>
+<p><code>webrtc:default</code> grants three sets. Grant sets on their own to narrow what a window may do.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Set</th><th>Commands</th></tr></thead>
+  <tbody>
+    <tr><td><code>webrtc:allow-peer</code></td><td>Create, negotiate, add candidates, stats, ICE restart, close</td></tr>
+    <tr><td><code>webrtc:allow-data</code></td><td>Create, send on and close data channels; buffered amount and threshold</td></tr>
+    <tr><td><code>webrtc:allow-media</code></td><td>Transceivers, keyframe requests, transforms, DTMF, audio processing, media and audio frames</td></tr>
+  </tbody>
+</table></div>
+<p>Camera, microphone and screen capture are not part of these. They stay with the webview's own <code>getUserMedia</code> and its permission handling.</p>
+
+<h2>Lifecycle</h2>
+<ul>
+  <li>Peer connections belong to the webview that created them.</li>
+  <li>They close when the page navigates, when its window is destroyed, and when the plugin is dropped.</li>
+  <li><code>pc.close()</code> in the page closes one at once.</li>
+</ul>
+
+<h2>Detecting the shim</h2>
+<p><code>RTCPeerConnection.__tauriShim</code> is set when the plugin installed the classes. It holds the engine name. The marker is also on the prototype, so it survives wrappers such as webrtc-adapter.</p>
+<pre><code>const shim = RTCPeerConnection.prototype.__tauriShim; // { level: 'L3', engine: 'native-str0m' } or undefined</code></pre>

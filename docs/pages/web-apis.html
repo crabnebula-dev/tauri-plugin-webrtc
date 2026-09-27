@@ -1,0 +1,66 @@
+<!-- title: Web APIs -->
+<!-- nav: Web APIs -->
+<!-- order: 4 -->
+<h1>Web APIs</h1>
+<p class="lead">The shim installs the WebRTC classes on <code>window</code> with W3C shapes and event ordering. This page lists what each one does and where it differs from a browser.</p>
+
+<h2>Installed classes</h2>
+<p><code>RTCPeerConnection</code> (also as <code>webkitRTCPeerConnection</code>), <code>RTCSessionDescription</code>, <code>RTCIceCandidate</code>, <code>RTCDataChannel</code>, <code>RTCPeerConnectionIceEvent</code>, <code>RTCDataChannelEvent</code>, <code>RTCTrackEvent</code>, <code>RTCRtpSender</code>, <code>RTCRtpReceiver</code>, <code>RTCRtpTransceiver</code>, <code>RTCDTMFSender</code>, <code>RTCDTMFToneChangeEvent</code> and <code>RTCRtpScriptTransform</code>. <code>Worker</code> is wrapped so that transform workers get <code>RTCRtpScriptTransformer</code>.</p>
+
+<h2 id="pc">RTCPeerConnection</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Member</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>createOffer</code>, <code>createAnswer</code>, <code>setLocalDescription</code>, <code>setRemoteDescription</code></td><td>Full JSEP, including <code>pranswer</code>, explicit rollback and the implicit rollback that perfect negotiation relies on. An offer on an unchanged session is still an offer. A local description may be re-serialised (line order, candidates, codec parameters) but not edited structurally.</td></tr>
+    <tr><td><code>addIceCandidate</code>, <code>icecandidate</code></td><td>Trickle both ways, end-of-candidates, mDNS <code>.local</code> candidates</td></tr>
+    <tr><td><code>restartIce()</code></td><td>The next offer restarts ICE</td></tr>
+    <tr><td><code>addTrack</code>, <code>removeTrack</code>, <code>addTransceiver</code>, <code>getTransceivers</code>, <code>getSenders</code>, <code>getReceivers</code></td><td>W3C transceiver reuse and association with remote media sections; msid stream ids</td></tr>
+    <tr><td><code>createDataChannel</code>, <code>datachannel</code></td><td>See below</td></tr>
+    <tr><td><code>getStats()</code></td><td>Candidate pairs, candidates and transport (with <code>tlsGroup</code>) from the engine; <code>inbound-rtp</code> and <code>outbound-rtp</code> from the shim's media pipes. A track selector filters by kind.</td></tr>
+    <tr><td>State attributes and events</td><td>Signalling, ICE gathering, ICE connection and connection states, with their <code>*statechange</code> events; <code>negotiationneeded</code>; <code>canTrickleIceCandidates</code></td></tr>
+    <tr><td><code>getConfiguration</code>, <code>setConfiguration</code></td><td><code>setConfiguration</code> records new <code>iceServers</code> for <code>getConfiguration</code>; the engine keeps the servers it was created with</td></tr>
+    <tr><td><code>sctp</code></td><td><code>maxMessageSize</code> 262144 bytes</td></tr>
+    <tr><td><code>generateCertificate()</code></td><td>Rejects with <code>NotSupportedError</code>. Each connection has its own ECDSA P-256 certificate.</td></tr>
+  </tbody>
+</table></div>
+
+<h3>Configuration</h3>
+<p><code>iceServers</code> (<code>stun:</code>, <code>turn:</code> with <code>?transport=udp|tcp</code>, <code>turns:</code>), <code>iceTransportPolicy</code> and <code>bundlePolicy</code> behave as in browsers. One member is not W3C: <code>postQuantum</code>, on <a href="post-quantum.html">Post-quantum</a>.</p>
+
+<h2 id="dc">RTCDataChannel</h2>
+<ul>
+  <li><code>ordered</code>, <code>maxRetransmits</code>, <code>maxPacketLifeTime</code>, <code>protocol</code>, <code>negotiated</code> with <code>id</code>.</li>
+  <li><code>send()</code> takes strings, <code>ArrayBuffer</code>, typed arrays and <code>Blob</code>s; <code>binaryType</code> is <code>arraybuffer</code> or <code>blob</code>.</li>
+  <li><code>bufferedAmount</code>, <code>bufferedAmountLowThreshold</code> and <code>bufferedamountlow</code>.</li>
+</ul>
+
+<h2 id="rtp">Senders, receivers and transceivers</h2>
+<ul>
+  <li><code>direction</code>, <code>currentDirection</code>, <code>stop()</code>, <code>mid</code>.</li>
+  <li><code>RTCRtpSender.replaceTrack()</code> swaps the source without renegotiation.</li>
+  <li><code>getParameters</code> and <code>setParameters</code>: <code>active</code>, <code>maxBitrate</code> and <code>scaleResolutionDownBy</code> apply to the encoder.</li>
+  <li><code>setCodecPreferences()</code> reorders and filters codecs; <code>getCapabilities(kind)</code> lists what the page can encode.</li>
+  <li><code>RTCRtpSender.dtmf</code> on audio senders.</li>
+</ul>
+
+<h3>Codecs</h3>
+<p>Audio is Opus. Video is VP8 always, and H.264 when WebCodecs in the webview can encode and decode it; the shim probes that before the first offer. Encoding runs in the page, so the webview's WebCodecs decides what is available.</p>
+
+<h3>Simulcast</h3>
+<p>A sender given several <code>sendEncodings</code> sends one layer: the active encoding with the least downscaling. SFUs such as LiveKit accept that and forward it to every subscriber.</p>
+
+<h2 id="dtmf">RTCDTMFSender</h2>
+<p><code>insertDTMF(tones, duration, interToneGap)</code>, <code>toneBuffer</code>, <code>canInsertDTMF</code> and <code>tonechange</code>, as in the spec. Tones go out as RFC 4733 telephone events; a comma pauses for two seconds.</p>
+
+<h2 id="transform">Encoded transforms</h2>
+<p><code>RTCRtpScriptTransform</code>, the WebKit and Firefox shape of insertable streams, on senders and receivers for audio and video. Construct it with a <code>Worker</code>; the worker receives <code>rtctransform</code> events with readable and writable streams of <code>RTCEncodedVideoFrame</code> and <code>RTCEncodedAudioFrame</code>. LiveKit's end-to-end encryption runs through it unchanged.</p>
+<p>Under a CSP that forbids <code>blob:</code> workers, the shim withdraws <code>RTCRtpScriptTransform</code> instead of letting media stall. See <a href="csp.html">CSP and frames</a>.</p>
+
+<h2 id="not-yet">Not yet</h2>
+<ul>
+  <li>VP9 and AV1.</li>
+  <li>Receiving simulcast layers.</li>
+  <li>Changing ICE servers on a live connection.</li>
+  <li><code>RTCPeerConnection.generateCertificate()</code> and the <code>certificates</code> configuration member.</li>
+  <li>The Chromium-style <code>createEncodedStreams()</code>; use <code>RTCRtpScriptTransform</code>.</li>
+</ul>
